@@ -6,17 +6,53 @@ import os
 
 st.set_page_config(page_title="AI Decision Engine", layout="wide")
 
+# 🎨 UI Styling
+st.markdown("""
+    <style>
+        .stTextInput>div>div>input {
+            border-radius: 10px;
+            padding: 10px;
+        }
+        .stButton button {
+            border-radius: 10px;
+            background-color: #4CAF50;
+            color: white;
+            font-weight: bold;
+        }
+        .block-container {
+            padding-top: 2rem;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 # ---------- LOGIN SYSTEM ----------
-st.sidebar.title("🔐 Login")
+if "logged_in" not in st.session_state:
+    
+    st.title("🚀 AI Decision Engine")
+    st.subheader("🔐 Login to Continue")
 
-username = st.sidebar.text_input("Username")
-password = st.sidebar.text_input("Password", type="password")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
-# Simple login (you can expand later)
-if username == "admin" and password == "1234":
-    st.sidebar.success("Logged in")
-else:
+    if st.button("Login"):
+        if username == "admin" and password == "1234":
+            st.session_state["logged_in"] = True
+            st.session_state["username"] = username
+            st.success("✅ Login successful")
+            st.rerun()
+        else:
+            st.error("❌ Invalid credentials")
+
     st.stop()
+
+# ---------- MAIN APP ----------
+username = st.session_state["username"]
+
+st.sidebar.success(f"👤 Logged in as: {username}")
+
+if st.sidebar.button("Logout"):
+    st.session_state.clear()
+    st.rerun()
 
 st.title("🚀 AI Decision Engine (SaaS Version)")
 
@@ -32,7 +68,7 @@ uploaded_file = st.file_uploader("Upload Your Excel (First Time Only)", type=["x
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
     df.to_excel(user_file_path, index=False)
-    st.success("File saved successfully!")
+    st.success("✅ File saved successfully!")
 
 # ---------- LOAD DATA ----------
 if os.path.exists(user_file_path):
@@ -41,7 +77,7 @@ if os.path.exists(user_file_path):
     df.columns = df.columns.str.lower().str.replace(" ", "_")
     df.fillna(0, inplace=True)
 
-    # Basic mapping (you can improve later)
+    # Mapping
     if 'client_name' in df.columns:
         df.rename(columns={'client_name': 'name'}, inplace=True)
     if 'investment_amount' in df.columns:
@@ -141,4 +177,4 @@ if os.path.exists(user_file_path):
         st.divider()
 
 else:
-    st.warning("Upload your Excel file to begin.")
+    st.warning("📂 Upload your Excel file to begin.")
