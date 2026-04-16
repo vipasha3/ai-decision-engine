@@ -2,205 +2,169 @@ import streamlit as st
 import pandas as pd
 import datetime
 import os
-import random
 from sklearn.ensemble import RandomForestClassifier
 
-st.set_page_config(page_title="AI Growth Engine Pro", layout="wide")
+st.set_page_config(page_title="AI Growth Engine", layout="wide")
 
-# ---------- USER DATABASE ----------
-users = {
-    "aditya": {"password": "1234", "company": "Aditya Finoptions"},
-    "demo": {"password": "demo", "company": "Demo Advisory"},
-}
-
-# ---------- LOGIN ----------
+# ---------- SESSION LOGIN ----------
 if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
+    st.session_state.logged_in = False
 
-st.title("🚀 AI Growth Engine PRO")
+st.title("🚀 AI Growth Engine")
 
-if not st.session_state["logged_in"]:
+# ---------- LOGIN (NO HARDCODE) ----------
+if not st.session_state.logged_in:
     st.subheader("🔐 Login")
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    username = st.text_input("Enter Your Name")
+    company = st.text_input("Enter Company Name")
 
     if st.button("Login"):
-        if username in users and users[username]["password"] == password:
-            st.session_state["logged_in"] = True
-            st.session_state["username"] = username
-            st.session_state["company"] = users[username]["company"]
+        if username and company:
+            st.session_state.logged_in = True
+            st.session_state.username = username
+            st.session_state.company = company
             st.rerun()
         else:
-            st.error("Invalid credentials")
+            st.warning("Please fill all details")
 
     st.stop()
 
-# ---------- USER INFO ----------
-username = st.session_state["username"]
-company = st.session_state["company"]
+# ---------- AFTER LOGIN ----------
+username = st.session_state.username
+company = st.session_state.company
 
-st.sidebar.success(f"👤 {company}")
+st.sidebar.success(f"👤 {username}")
+st.sidebar.info(f"🏢 {company}")
 
 if st.sidebar.button("Logout"):
     st.session_state.clear()
     st.rerun()
 
-st.title(f"📊 {company} Dashboard")
+st.title(f"📊 Welcome {username} - {company}")
 
 # ---------- STORAGE ----------
 DATA_FOLDER = "user_data"
 os.makedirs(DATA_FOLDER, exist_ok=True)
-user_file_path = f"{DATA_FOLDER}/{username}.xlsx"
+file_path = f"{DATA_FOLDER}/{username}.xlsx"
 
-# ---------- UPLOAD ----------
+# ---------- FILE UPLOAD ----------
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
-    df.to_excel(user_file_path, index=False)
-    st.success("File saved successfully")
+    df.to_excel(file_path, index=False)
+    st.success("File uploaded & saved")
 
-# ---------- LOAD ----------
-if os.path.exists(user_file_path):
+# ---------- LOAD DATA ----------
+if os.path.exists(file_path):
 
-    df = pd.read_excel(user_file_path)
+    df = pd.read_excel(file_path)
     df.columns = df.columns.str.lower().str.replace(" ", "_")
     df.fillna(0, inplace=True)
 
-    # Column mapping
+    # REQUIRED COLUMNS CHECK
+    required_cols = ['client_name', 'investment_amount', 'last_interaction_date']
+    for col in required_cols:
+        if col not in df.columns:
+            st.error(f"Missing column: {col}")
+            st.stop()
+
+    # RENAME
     df.rename(columns={
         'client_name': 'name',
         'investment_amount': 'investment',
         'last_interaction_date': 'last_interaction'
     }, inplace=True)
 
-    # ---------- DATE ----------
+    # DATE
     df['last_interaction'] = pd.to_datetime(df['last_interaction'], errors='coerce')
     today = datetime.datetime.today()
     df['days_since_last_contact'] = (today - df['last_interaction']).dt.days
     df['days_since_last_contact'].fillna(0, inplace=True)
 
-    # ---------- BASIC FEATURES ----------
+    # FEATURES
     df['high_value'] = (df['investment'] > 100000).astype(int)
     df['inactive'] = (df['days_since_last_contact'] > 30).astype(int)
 
-    # ---------- ML MODEL ----------
-    # Create training label (proxy logic for now)
+    # ---------- ML ----------
     df['will_invest'] = ((df['high_value'] == 1) & (df['days_since_last_contact'] < 15)).astype(int)
 
     features = df[['days_since_last_contact', 'investment', 'high_value', 'inactive']]
     target = df['will_invest']
 
     model = RandomForestClassifier(n_estimators=50)
-    model.fit(features, target)
 
-    df['invest_probability'] = model.predict_proba(features)[:, 1]
+    if len(target.unique()) > 1:
+        model.fit(features, target)
+        df['probability'] = model.predict_proba(features)[:, 1]
+    else:
+        # SAFE fallback
+        df['probability'] = (
+            (df['investment'] / df['investment'].max()) * 0.6 +
+            (1 / (df['days_since_last_contact'] + 1)) * 0.4
+        )
 
-    # ---------- PRIORITY ----------
-    df['priority_score'] = (
-        df['invest_probability'] * 0.6 +
-        df['inactive'] * 0.3 +
-        df['high_value'] * 0.1
-    )
-
-    df = df.sort_values(by='priority_score', ascending=False)
-    top_df = df.head(5)
-
-    # ---------- INSIGHT ENGINE ----------
-    def generate_insight(row):
-        if row['invest_probability'] > 0.7:
-            return f"{row['name']} is highly likely to invest soon. Act fast."
-        elif row['inactive'] == 1:
-            return f"{row['name']} is inactive for {int(row['days_since_last_contact'])} days. Risk of churn."
-        else:
-            return f"{row['name']} needs engagement to unlock potential."
-
-    # ---------- ACTION ENGINE ----------
-    actions = []
-
-    for _, row in top_df.iterrows():
-
-        if row['invest_probability'] > 0.7:
-            action = f"💰 Pitch investment to {row['name']}"
-            impact = int(row['investment'] * 0.3)
-            tag = "🟢 High Conversion"
-
-        elif row['inactive'] == 1:
-            action = f"📞 Reconnect with {row['name']}"
-            impact = int(row['investment'] * 0.2)
-            tag = "🔴 Churn Risk"
-
-        else:
-            action = f"📩 Engage {row['name']}"
-            impact = int(row['investment'] * 0.1)
-            tag = "🟡 Nurture"
-
-        insight = generate_insight(row)
-
-        actions.append({
-            "Client": row['name'],
-            "Category": tag,
-            "Action": action,
-            "Impact": impact,
-            "Insight": insight,
-            "Probability": round(row['invest_probability'], 2)
-        })
-
-    actions_df = pd.DataFrame(actions)
+    # PRIORITY
+    df['priority'] = df['probability'] * 0.7 + df['inactive'] * 0.3
+    df = df.sort_values(by='priority', ascending=False)
 
     # ---------- METRICS ----------
-    total_opportunity = actions_df['Impact'].sum()
     total_clients = len(df)
+    avg_prob = round(df['probability'].mean(), 2)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("💰 Revenue Opportunity", f"₹{total_opportunity}")
-    col2.metric("👥 Total Clients", total_clients)
-    col3.metric("🎯 Priority Actions", len(actions_df))
-
-    st.divider()
-
-    # ---------- CHARTS ----------
-    st.subheader("📊 Insights Dashboard")
-
-    st.bar_chart(actions_df.set_index("Client")["Probability"])
-    st.line_chart(df['investment'])
+    c1, c2 = st.columns(2)
+    c1.metric("👥 Total Clients", total_clients)
+    c2.metric("📈 Avg Investment Probability", avg_prob)
 
     st.divider()
 
     # ---------- TOP ACTIONS ----------
-    st.subheader("🔥 Top 5 AI Actions")
+    st.subheader("🔥 Top Actions")
 
-    for _, row in actions_df.iterrows():
+    top_df = df.head(5)
+
+    for i, row in top_df.iterrows():
+
+        if row['probability'] > 0.7:
+            action = "💰 Pitch Investment"
+        elif row['inactive'] == 1:
+            action = "📞 Reconnect"
+        else:
+            action = "📩 Engage"
+
         st.markdown(f"""
-        <div style="padding:15px;border-radius:10px;background:#f4f6f8;margin-bottom:10px;">
-        <b>{row['Client']} ({row['Category']})</b><br>
-        Action: {row['Action']}<br>
-        Impact: ₹{row['Impact']}<br>
-        Probability: {row['Probability']}<br>
-        <i>{row['Insight']}</i>
+        <div style="padding:15px;border-radius:10px;background:#f5f5f5;margin-bottom:10px;">
+        <b>{row['name']}</b><br>
+        Action: {action}<br>
+        Probability: {round(row['probability'],2)}<br>
+        Last Contact: {int(row['days_since_last_contact'])} days ago
         </div>
         """, unsafe_allow_html=True)
 
-        # ---------- WHATSAPP BUTTON ----------
-        if st.button(f"📲 WhatsApp {row['Client']}"):
-            st.success(f"Message sent to {row['Client']} (simulation)")
+        if st.button(f"📲 WhatsApp {row['name']}", key=i):
+            st.success(f"Message sent to {row['name']}")
 
     st.divider()
 
-    # ---------- EVENT RECOMMENDATION ----------
-    st.subheader("📅 Smart Event Recommendation")
+    # ---------- CHARTS ----------
+    st.subheader("📊 Dashboard")
 
-    high_prob_clients = df[df['invest_probability'] > 0.6]
+    st.bar_chart(df.head(10).set_index("name")["probability"])
+    st.line_chart(df['investment'])
+
+    st.divider()
+
+    # ---------- EVENT ----------
+    st.subheader("📅 Event Suggestion")
+
+    high_prob = df[df['probability'] > 0.6]
 
     st.info(f"""
-    📌 Event: Wealth Growth Seminar  
-    🎯 Target Clients: {len(high_prob_clients)}  
-    👥 Expected Conversion: {len(high_prob_clients)//2}  
-    💰 Potential Revenue: ₹{int(high_prob_clients['investment'].sum() * 0.1)}  
-
-    💡 Reason: Clients show high investment probability.
+    📌 Event: Investment Seminar  
+    🎯 Clients: {len(high_prob)}  
+    💰 Potential: ₹{int(high_prob['investment'].sum()*0.1)}
     """)
 
 else:
-    st.warning("Upload your Excel file to begin")
+    st.warning("Upload file to start")
