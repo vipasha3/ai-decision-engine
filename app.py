@@ -1,187 +1,107 @@
 import streamlit as st
 import pandas as pd
 import datetime
-import os
-from sklearn.ensemble import RandomForestClassifier
-import plotly.express as px
-import random
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
-st.set_page_config(page_title="AI Revenue Intelligence", layout="wide")
+# --- CONFIGURATION & UI ---
+st.set_page_config(page_title="FinIntelligence Pro", layout="wide")
 
-# ---------- CSS ----------
-st.markdown("""
-<style>
-.kpi {
-    padding:18px;
-    border-radius:12px;
-    color:white;
-    text-align:center;
-    font-weight:600;
-    cursor:pointer;
-}
-.kpi-title { font-size:14px; opacity:0.8; }
-.kpi-value { font-size:22px; }
-
-.green { background: linear-gradient(135deg,#28a745,#4cd964); }
-.yellow { background: linear-gradient(135deg,#ffc107,#ffe066); color:black; }
-.red { background: linear-gradient(135deg,#dc3545,#ff6b6b); }
-.blue { background: linear-gradient(135deg,#007bff,#66b3ff); }
-
-.card {
-    padding:15px;
-    border-radius:12px;
-    margin-bottom:10px;
-    box-shadow:0px 2px 8px rgba(0,0,0,0.08);
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ---------- LOGIN ----------
-if "login" not in st.session_state:
-    st.session_state.login = False
-
-if not st.session_state.login:
-    st.title("🚀 AI Revenue Intelligence")
-
-    name = st.text_input("Your Name")
-    company = st.text_input("Company Name")
-
-    if st.button("Enter Dashboard"):
-        if name and company:
-            st.session_state.login = True
-            st.session_state.name = name
-            st.session_state.company = company
-            st.rerun()
-    st.stop()
-
-name = st.session_state.name
-company = st.session_state.company
-
-st.title(f"📊 {company} — Revenue Intelligence")
-
-# ---------- FILE ----------
-folder = "data"
-os.makedirs(folder, exist_ok=True)
-path = f"{folder}/{name}.xlsx"
-
-file = st.file_uploader("Upload Client Data", type=["xlsx"])
-
-if file:
-    df = pd.read_excel(file)
-    df.to_excel(path, index=False)
-
-# ---------- LOAD ----------
-if os.path.exists(path):
-
-    df = pd.read_excel(path)
-    df.columns = df.columns.str.lower().str.replace(" ", "_")
-
-    df.rename(columns={
-        'client_name': 'name',
-        'investment_amount': 'investment',
-        'last_interaction_date': 'last'
-    }, inplace=True)
-
-    df['last'] = pd.to_datetime(df['last'])
-    today = datetime.datetime.today()
-    df['days'] = (today - df['last']).dt.days
-
-    df['high'] = (df['investment'] > 100000).astype(int)
-    df['inactive'] = (df['days'] > 30).astype(int)
-
-    df['target'] = ((df['high']==1) & (df['days']<15)).astype(int)
-
-    X = df[['days','investment','high','inactive']]
-    y = df['target']
-
-    model = RandomForestClassifier()
-
-    if len(y.unique()) > 1:
-        model.fit(X,y)
-        df['prob'] = model.predict_proba(X)[:,1]
+# --- 1. PERSONALIZED GREETING LOGIC ---
+def get_greeting(name):
+    hour = datetime.datetime.now().hour
+    if hour < 12:
+        greet = "Good Morning"
+    elif 12 <= hour < 17:
+        greet = "Good Afternoon"
     else:
-        df['prob'] = df['investment']/df['investment'].max()
+        greet = "Good Evening"
+    return f"Hi {name}, {greet}! ✨"
 
-    def seg(p):
-        if p > 0.7: return "High"
-        elif p > 0.4: return "Medium"
-        else: return "Low"
+# --- SIDEBAR: LOGIN & SETUP ---
+with st.sidebar:
+    st.title("Settings")
+    user_name = st.text_input("Enter your name", value="Advisor")
+    st.divider()
+    uploaded_file = st.file_uploader("Upload your Excel/CSV Data", type=['xlsx', 'csv'])
 
-    df['segment'] = df['prob'].apply(seg)
+# --- MAIN INTERFACE ---
+st.title(get_greeting(user_name))
+st.subheader("What's on your mind today?")
 
-    # ---------- KPI ----------
-    total = int(df['investment'].sum())
-    high = len(df[df.segment=="High"])
-    medium = len(df[df.segment=="Medium"])
-    low = len(df[df.segment=="Low"])
-
-    st.subheader("📌 Key Metrics")
-
-    col1,col2,col3,col4 = st.columns(4)
-
-    if col1.button("Total Pipeline"):
-        st.session_state.filter="ALL"
-    col1.markdown(f'<div class="kpi blue"><div class="kpi-title">Total Pipeline</div><div class="kpi-value">₹{total}</div></div>', unsafe_allow_html=True)
-
-    if col2.button("High"):
-        st.session_state.filter="High"
-    col2.markdown(f'<div class="kpi green"><div class="kpi-title">High Intent</div><div class="kpi-value">{high}</div></div>', unsafe_allow_html=True)
-
-    if col3.button("Medium"):
-        st.session_state.filter="Medium"
-    col3.markdown(f'<div class="kpi yellow"><div class="kpi-title">Medium Intent</div><div class="kpi-value">{medium}</div></div>', unsafe_allow_html=True)
-
-    if col4.button("Low"):
-        st.session_state.filter="Low"
-    col4.markdown(f'<div class="kpi red"><div class="kpi-title">Low Intent</div><div class="kpi-value">{low}</div></div>', unsafe_allow_html=True)
-
-    if "filter" not in st.session_state:
-        st.session_state.filter="ALL"
-
-    if st.session_state.filter!="ALL":
-        df_view = df[df.segment==st.session_state.filter]
+if uploaded_file:
+    # Load Data
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
     else:
-        df_view = df
+        df = pd.read_excel(uploaded_file)
 
-    # ---------- INSIGHTS ----------
-    st.subheader("🧠 AI Insights")
+    st.success("Data loaded successfully!")
+    
+    # --- 2. GENERAL MAPPING (The "Smart" part) ---
+    st.info("Identify your data columns so the AI can analyze them:")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        name_col = st.selectbox("Client Name Column", df.columns)
+    with col2:
+        date_col = st.selectbox("Last Transaction Date", df.columns)
+    with col3:
+        val_col = st.selectbox("Total Investment/AUM Column", df.columns)
 
-    top = df.sort_values(by="prob",ascending=False).iloc[0]
+    # Convert date
+    df[date_col] = pd.to_datetime(df[date_col])
+    
+    # --- 3. DATA SCIENCE ENGINE (Clustering) ---
+    # We calculate 'Recency' automatically for the user
+    df['DaysSinceLast'] = (pd.Timestamp.now() - df[date_col]).dt.days
+    
+    # Simple Clustering Logic
+    X = df[['DaysSinceLast', val_col]].fillna(0)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    model = KMeans(n_clusters=3, random_state=42)
+    df['Segment'] = model.fit_predict(X_scaled)
 
-    st.info(f"""
-    {top['name']} represents the highest conversion probability in your portfolio. 
-    With ₹{int(top['investment'])} exposure and strong recency signals, this client sits at the peak of your revenue funnel. 
-    Immediate engagement is recommended to capitalize on this opportunity window.
-    """)
+    # --- 4. ACTIONABLE DASHBOARD ---
+    st.divider()
+    st.header("🎯 Your Strategic Action Plan")
+    
+    tab1, tab2, tab3 = st.tabs(["Priority Meetings", "Event Planner", "Revenue Opportunities"])
 
-    # ---------- EVENT ----------
-    st.subheader("📅 Event Strategy")
+    with tab1:
+        st.write("### 🚨 Clients to Call Today (Risk of Churn)")
+        # Logic: High DaysSinceLast = High Risk
+        risk_clients = df.sort_values(by='DaysSinceLast', ascending=False).head(5)
+        st.table(risk_clients[[name_col, 'DaysSinceLast', val_col]])
 
-    st.success(f"""
-    Growth Workshop Targeting {high} High-Intent Clients  
-    Expected Conversion Rate: 40–60%  
-    Potential Revenue Impact: ₹{int(df[df.segment=='High']['investment'].sum()*0.1)}
-    """)
+    with tab2:
+        st.write("### 📅 Micro-Event Suggestions")
+        st.write("Based on your data, group these clients for a tea-meet or webinar:")
+        # Logic: Suggesting the "Champion" segment for a referral event
+        champion_cluster = df[df['Segment'] == 0].head(10)
+        st.write(f"**Target Group:** Top Investors")
+        st.write(f"**Topic:** 'Exclusive Wealth Strategies for 2024'")
+        st.dataframe(champion_cluster[[name_col, val_col]])
 
-    # ---------- TABLE ----------
-    st.subheader("📊 Client Intelligence Table")
-
-    df_view = df_view.sort_values(by="prob",ascending=False)
-
-    st.dataframe(df_view[['name','investment','prob','segment']])
-
-    # ---------- CHARTS ----------
-    st.subheader("📈 Analytics")
-
-    colA,colB = st.columns(2)
-
-    fig1 = px.bar(df, x="segment", y="investment", color="segment",
-                  color_discrete_map={"High":"green","Medium":"orange","Low":"red"})
-    colA.plotly_chart(fig1, use_container_width=True)
-
-    fig2 = px.scatter(df, x="days", y="investment", color="segment",
-                      size="investment", hover_data=["name"])
-    colB.plotly_chart(fig2, use_container_width=True)
+    with tab3:
+        st.write("### 💰 Cross-Sell Potential")
+        # Logic: Low days since last but low AUM = Potential to grow
+        potential = df[(df['DaysSinceLast'] < 30) & (df[val_col] < df[val_col].median())]
+        st.write("These clients are active but have small portfolios. Pitch a new SIP!")
+        st.dataframe(potential[[name_col, val_col]])
 
 else:
-    st.warning("Upload file to start")
+    # DEFAULT VIEW (Before upload)
+    st.warning("Please upload your client data in the sidebar to begin.")
+    
+    # Visualizing how the data flows
+    
+    
+    st.write("""
+    ### Why use this instead of Excel?
+    1. **Predictive Alerts:** Excel shows what happened. This shows who is *leaving*.
+    2. **Automated Segmentation:** No manual pivot tables. The AI groups your clients for you.
+    3. **Action-Oriented:** It gives you a 'Call List' every morning.
+    """)    
