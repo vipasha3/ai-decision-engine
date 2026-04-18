@@ -208,4 +208,3 @@ Reply YES to confirm your seat.
 
 else:
     st.info("👈 Upload file to begin")
-    
