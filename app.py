@@ -7,6 +7,10 @@ import anthropic
 import json
 import re
 
+# Initialize navigation state
+if "screen" not in st.session_state:
+    st.session_state.screen = "upload"
+
 st.set_page_config(
     page_title="Finoptions Intelligence Pro",
     page_icon="◆",
@@ -484,12 +488,9 @@ def show_mapping(df):
             mapping[key] = sel if sel != "— skip —" else None
 
     if st.button("Run intelligence engine →", use_container_width=False):
-        st.session_state.mapping = mapping
-        st.session_state.raw_df = df
-        st.session_state.screen = "dashboard"
-        st.session_state.pop("ai_insight", None)
-        st.session_state.pop("ai_insight_stale", None)
-        st.rerun()
+        st.session_state.mapping = mapping  # This saves your column selections
+        st.session_state.screen = "dashboard" # This tells the router to switch
+        st.rerun() # This forces the screen to refresh
 
 # ── PROCESS DATA ───────────────────────────────────────────────────────────
 
@@ -837,22 +838,40 @@ def show_dashboard(clients):
 # ── MAIN ROUTER ────────────────────────────────────────────────────────────
 
 def main():
-    # Demo shortcut
-    if st.session_state.get("demo") and "clients" not in st.session_state:
+    # 1. Initialize screen if not present
+    if "screen" not in st.session_state:
+        st.session_state.screen = "upload"
+
+    # 2. Handle Demo Shortcut
+    if st.session_state.get("demo"):
         st.session_state.clients = prepare_demo()
         st.session_state.screen = "dashboard"
+        # Reset demo flag so it doesn't loop
+        st.session_state.demo = False 
+        st.rerun()
 
-    screen = st.session_state.get("screen", "upload")
-
-    if screen == "dashboard" and "clients" in st.session_state:
-        show_dashboard(st.session_state.clients)
+    # 3. Route to Dashboard
+    if st.session_state.screen == "dashboard":
+        # Check if we are coming from a manual upload or demo
+        if "mapping" in st.session_state and "upload_df" in st.session_state:
+            # Process the uploaded file with the saved mapping
+            clients = process(st.session_state.upload_df, st.session_state.mapping)
+            show_dashboard(clients)
+        elif "clients" in st.session_state:
+            # Show demo data
+            show_dashboard(st.session_state.clients)
+        else:
+            # Fallback if something goes wrong
+            st.session_state.screen = "upload"
+            st.rerun()
         return
 
-    if screen == "map" and "upload_df" in st.session_state:
+    # 4. Route to Mapping Screen
+    if st.session_state.screen == "map" and "upload_df" in st.session_state:
         show_mapping(st.session_state.upload_df)
         return
 
-    # Upload screen
+    # 5. Default: Show Upload Screen
     uploaded = show_upload()
 
     if uploaded:
