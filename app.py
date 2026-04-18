@@ -455,6 +455,8 @@ def show_upload():
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Load sample dataset →", use_container_width=True):
             st.session_state.demo = True
+            st.session_state.pop("ai_insight", None)
+            st.session_state.pop("ai_insight_stale", None)
             st.rerun()
 
     return uploaded
@@ -485,6 +487,8 @@ def show_mapping(df):
         st.session_state.mapping = mapping
         st.session_state.raw_df = df
         st.session_state.screen = "dashboard"
+        st.session_state.pop("ai_insight", None)
+        st.session_state.pop("ai_insight_stale", None)
         st.rerun()
 
 # ── PROCESS DATA ───────────────────────────────────────────────────────────
