@@ -495,17 +495,22 @@ def show_mapping(df):
 
 def process(raw_df, mapping):
     clients = []
+    default_fields = {
+        "name": "", "age": "", "portfolio": "0", "sip": "0",
+        "lastContact": "", "goal": "", "tenure": "2020", "nominee": ""
+    }
     for _, row in raw_df.iterrows():
-        c = {}
+        c = dict(default_fields)
         for key, _ in FIELDS:
             col = mapping.get(key)
-            c[key] = str(row[col]).strip() if col and col in raw_df.columns and pd.notna(row[col]) else ""
+            if col and col in raw_df.columns and pd.notna(row[col]):
+                c[key] = str(row[col]).strip()
         c["score"] = score_client(c)
         c["churn"] = churn_risk(c)
         c["priority"] = "High" if c["score"] >= 70 else ("Medium" if c["score"] >= 45 else "Low")
         c["flags"] = build_flags(c)
         clients.append(c)
-    clients.sort(key=lambda x: x["score"], reverse=True)
+    clients.sort(key=lambda x: x.get("score", 0), reverse=True)
     return clients
 
 # ── DEMO DATA ──────────────────────────────────────────────────────────────
@@ -542,18 +547,18 @@ def prepare_demo():
         c2["priority"] = "High" if c2["score"] >= 70 else ("Medium" if c2["score"] >= 45 else "Low")
         c2["flags"] = build_flags(c2)
         clients.append(c2)
-    clients.sort(key=lambda x: x["score"], reverse=True)
+    clients.sort(key=lambda x: x.get("score", 0), reverse=True)
     return clients
 
 # ── DASHBOARD ──────────────────────────────────────────────────────────────
 
 def show_dashboard(clients):
-    total_aum = sum(num(c["portfolio"]) for c in clients)
-    high = [c for c in clients if c["priority"] == "High"]
-    churn_risk_list = [c for c in clients if c["churn"] > 50]
-    sip_gap = [c for c in clients if "SIP gap" in c["flags"]]
-    no_nom = [c for c in clients if "No nominee" in c["flags"]]
-    hni = [c for c in clients if "HNI" in c["flags"]]
+    total_aum = sum(num(c.get("portfolio", 0)) for c in clients)
+    high = [c for c in clients if c.get("priority", "Low") == "High"]
+    churn_risk_list = [c for c in clients if c.get("churn", 0) > 50]
+    sip_gap = [c for c in clients if "SIP gap" in c.get("flags", [])]
+    no_nom = [c for c in clients if "No nominee" in c.get("flags", [])]
+    hni = [c for c in clients if "HNI" in c.get("flags", [])]
     top = clients[0] if clients else {}
 
     # ── HEADER ──
@@ -647,21 +652,21 @@ def show_dashboard(clients):
         filter_sel = st.selectbox("Filter", filter_options, label_visibility="collapsed")
 
         filtered = clients
-        if filter_sel == "High priority": filtered = [c for c in clients if c["priority"] == "High"]
-        elif filter_sel == "Medium": filtered = [c for c in clients if c["priority"] == "Medium"]
-        elif filter_sel == "Low": filtered = [c for c in clients if c["priority"] == "Low"]
-        elif filter_sel == "Churn risk": filtered = [c for c in clients if c["churn"] > 50]
-        elif filter_sel == "SIP gap": filtered = [c for c in clients if "SIP gap" in c["flags"]]
-        elif filter_sel == "No nominee": filtered = [c for c in clients if "No nominee" in c["flags"]]
+        if filter_sel == "High priority": filtered = [c for c in clients if c.get("priority", "Low") == "High"]
+        elif filter_sel == "Medium": filtered = [c for c in clients if c.get("priority", "Low") == "Medium"]
+        elif filter_sel == "Low": filtered = [c for c in clients if c.get("priority", "Low") == "Low"]
+        elif filter_sel == "Churn risk": filtered = [c for c in clients if c.get("churn", 0) > 50]
+        elif filter_sel == "SIP gap": filtered = [c for c in clients if "SIP gap" in c.get("flags", [])]
+        elif filter_sel == "No nominee": filtered = [c for c in clients if "No nominee" in c.get("flags", [])]
 
         st.markdown(f"<div style='font-size:12px;color:#7a8394;margin-bottom:.75rem'>Showing {len(filtered)} of {len(clients)} clients</div>", unsafe_allow_html=True)
 
         rows_html = ""
         for i, c in enumerate(filtered):
-            chip_cls = "chip-high" if c["priority"]=="High" else ("chip-medium" if c["priority"]=="Medium" else "chip-low")
-            fill_color = "#22c55e" if c["score"]>=70 else ("#f59e0b" if c["score"]>=45 else "#ef4444")
-            churn_color = "#ef4444" if c["churn"]>60 else ("#f59e0b" if c["churn"]>30 else "#22c55e")
-            flags_html = "".join(f'<span class="flag-pill">{f}</span>' for f in c["flags"][:2])
+            chip_cls = "chip-high" if c.get("priority", "Low")=="High" else ("chip-medium" if c.get("priority", "Low")=="Medium" else "chip-low")
+            fill_color = "#22c55e" if c.get("score", 0)>=70 else ("#f59e0b" if c.get("score", 0)>=45 else "#ef4444")
+            churn_color = "#ef4444" if c.get("churn", 0)>60 else ("#f59e0b" if c.get("churn", 0)>30 else "#22c55e")
+            flags_html = "".join(f'<span class="flag-pill">{f}</span>' for f in c.get("flags", [])[:2])
             rank_icon = "◆" if i == 0 else ("◇" if i == 1 else ("△" if i == 2 else f"#{i+1}"))
             rows_html += f"""<tr>
               <td style="color:#7a8394;font-family:'DM Mono',monospace;font-size:12px;width:44px">{rank_icon}</td>
@@ -692,9 +697,9 @@ def show_dashboard(clients):
     # ─ TAB 2: SMART ACTIONS ─
     with tab2:
         top4 = clients[:4]
-        inactive = [c for c in clients if "Inactive 6m+" in c["flags"]][:2]
-        sip_opp = [c for c in clients if "SIP gap" in c["flags"]][:2]
-        no_nom_list = [c for c in clients if "No nominee" in c["flags"]][:2]
+        inactive = [c for c in clients if "Inactive 6m+" in c.get("flags", [])][:2]
+        sip_opp = [c for c in clients if "SIP gap" in c.get("flags", [])][:2]
+        no_nom_list = [c for c in clients if "No nominee" in c.get("flags", [])][:2]
 
         actions = [
             {
@@ -739,7 +744,7 @@ def show_dashboard(clients):
 
     # ─ TAB 3: EVENTS ─
     with tab3:
-        hni_clients = [c for c in clients if "HNI" in c["flags"]]
+        hni_clients = [c for c in clients if "HNI" in c.get("flags", [])]
         senior_clients = [c for c in clients if int(c.get("age") or 0) >= 55]
 
         events = [
@@ -748,21 +753,21 @@ def show_dashboard(clients):
                 "tag": "Revenue", "tag_color": "#22c55e",
                 "desc": f"Private 1:1 review for {len(hni_clients)} HNI clients. Present capital gain bonds and new MF opportunities with personalised return projections.",
                 "meta": f"{len(hni_clients)} clients · This quarter",
-                "targets": [c["name"] for c in hni_clients[:3]]
+                "targets": [c.get("name", "—") for c in hni_clients[:3]]
             },
             {
                 "title": "SIP accelerator drive",
                 "tag": "Growth", "tag_color": "#f59e0b",
                 "desc": f"Compound growth demo for {len(sip_gap)} clients with zero SIP. Show the ₹10L→₹40L projection in 15 years. One visual does the selling.",
                 "meta": f"{len(sip_gap)} clients · Next month",
-                "targets": [c["name"] for c in sip_gap[:3]]
+                "targets": [c.get("name", "—") for c in sip_gap[:3]]
             },
             {
                 "title": "Senior estate planning camp",
                 "tag": "Retention", "tag_color": "#a855f7",
                 "desc": f"LIC maturity planning, estate structuring for {len(senior_clients)} clients aged 55+. Builds deep loyalty that survives market downturns.",
                 "meta": f"{len(senior_clients)} clients · This quarter",
-                "targets": [c["name"] for c in senior_clients[:3]]
+                "targets": [c.get("name", "—") for c in senior_clients[:3]]
             },
         ]
 
@@ -784,9 +789,9 @@ def show_dashboard(clients):
 
     # ─ TAB 4: WHATSAPP ─
     with tab4:
-        client_names = [c["name"] for c in clients if c["name"]]
+        client_names = [c.get("name", "—") for c in clients if c.get("name", "—")]
         selected_name = st.selectbox("Select client", client_names)
-        sel_client = next((c for c in clients if c["name"] == selected_name), None)
+        sel_client = next((c for c in clients if c.get("name", "—") == selected_name), None)
 
         if sel_client:
             col_a, col_b = st.columns([1, 1])
