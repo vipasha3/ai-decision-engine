@@ -44,10 +44,7 @@ def init_db():
         uploaded_at TEXT,
         FOREIGN KEY(user_id) REFERENCES users(id)
     )""")
-    # Seed a default admin
-    pw = hashlib.sha256("admin123".encode()).hexdigest()
-    c.execute("INSERT OR IGNORE INTO users (username,password_hash,full_name,company,role,created_at) VALUES (?,?,?,?,?,?)",
-              ("admin", pw, "Kartik Dadia", "Aditya Finoptions", "owner", datetime.datetime.now().isoformat()))
+    # No default seed — each company registers their own account
     conn.commit()
     conn.close()
 
@@ -668,46 +665,80 @@ Write 4 sentences. Be specific — use actual numbers. Sound like a trusted coll
 # ── SCREENS ───────────────────────────────────────────────────────────────────
 
 # ── LOGIN ──
+def register_user(username, password, full_name, company, role="owner"):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO users (username,password_hash,full_name,company,role,created_at) VALUES (?,?,?,?,?,?)",
+                  (username.strip(), hash_pw(password), full_name.strip(), company.strip(), role, datetime.datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return True, "Account created successfully."
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False, "Username already taken. Choose a different one."
+
 def show_login():
-    st.markdown("""
-    <div class="login-wrap">
-      <div class="login-card">
-        <div class="login-logo">
-          <div class="login-logo-mark">◆</div>
-          <div class="login-title">Finoptions Pro</div>
-          <div class="login-sub">Intelligence platform for financial advisors</div>
+    # Center everything with columns
+    _, col, _ = st.columns([1, 1, 1])
+    with col:
+        st.markdown("""
+        <div style="text-align:center;margin-top:3rem;margin-bottom:2rem">
+          <div style="width:52px;height:52px;background:#00d97e;border-radius:14px;
+               display:inline-flex;align-items:center;justify-content:center;
+               font-size:24px;font-weight:700;color:#000;margin-bottom:1rem">◆</div>
+          <div style="font-size:1.5rem;font-weight:700;letter-spacing:-.02em;margin-bottom:4px">Finoptions Pro</div>
+          <div style="font-size:13px;color:#5a6480">Intelligence platform for financial advisors</div>
         </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
-    username = st.text_input("Username", placeholder="Enter your username")
-    password = st.text_input("Password", type="password", placeholder="Enter your password")
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("Sign in →", use_container_width=True):
-        if username and password:
-            user = check_login(username, password)
-            if user:
-                st.session_state.user_id = user[0]
-                st.session_state.user_name = user[1]
-                st.session_state.user_company = user[2]
-                st.session_state.user_role = user[3]
-                st.session_state.screen = "upload"
-                # Load saved clients if any
-                saved = load_clients_db(user[0])
-                if saved:
-                    st.session_state.clients = saved
-                st.rerun()
-            else:
-                st.error("Incorrect username or password.")
-        else:
-            st.warning("Please fill in both fields.")
+        login_tab, register_tab = st.tabs(["Sign in", "Create account"])
 
-    st.markdown("""
-        <div style="text-align:center;margin-top:1.5rem;font-size:11px;color:#5a6480;font-family:'Space Mono',monospace">
-          Demo: username <strong style="color:#8892a8">admin</strong> · password <strong style="color:#8892a8">admin123</strong>
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+        with login_tab:
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            username = st.text_input("Username", placeholder="Your username", key="li_user")
+            password = st.text_input("Password", type="password", placeholder="Your password", key="li_pass")
+            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+            if st.button("Sign in →", use_container_width=True, key="li_btn"):
+                if username and password:
+                    user = check_login(username, password)
+                    if user:
+                        st.session_state.user_id = user[0]
+                        st.session_state.user_name = user[1]
+                        st.session_state.user_company = user[2]
+                        st.session_state.user_role = user[3]
+                        st.session_state.screen = "upload"
+                        saved = load_clients_db(user[0])
+                        if saved:
+                            st.session_state.clients = saved
+                        st.rerun()
+                    else:
+                        st.error("Incorrect username or password.")
+                else:
+                    st.warning("Please fill in both fields.")
+
+        with register_tab:
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            r_name = st.text_input("Your full name", placeholder="e.g. Ramesh Patel", key="r_name")
+            r_company = st.text_input("Company name", placeholder="e.g. Patel Financial Services", key="r_company")
+            r_user = st.text_input("Choose username", placeholder="e.g. ramesh_patel", key="r_user")
+            r_pass = st.text_input("Choose password", type="password", placeholder="Min 6 characters", key="r_pass")
+            r_role = st.selectbox("Your role", ["Owner / Director", "Senior Advisor", "Advisor", "Team Member"], key="r_role")
+            role_map = {"Owner / Director": "owner", "Senior Advisor": "advisor",
+                        "Advisor": "advisor", "Team Member": "staff"}
+            st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+            if st.button("Create account →", use_container_width=True, key="r_btn"):
+                if all([r_name, r_company, r_user, r_pass]):
+                    if len(r_pass) < 6:
+                        st.warning("Password must be at least 6 characters.")
+                    else:
+                        ok, msg = register_user(r_user, r_pass, r_name, r_company, role_map[r_role])
+                        if ok:
+                            st.success(f"Account created! Sign in with username: {r_user}")
+                        else:
+                            st.error(msg)
+                else:
+                    st.warning("Please fill in all fields.")
 
 # ── TOP NAV ──
 def show_nav():
@@ -912,32 +943,81 @@ def show_dashboard(clients):
     </div>
     """, unsafe_allow_html=True)
 
-    # ── AI BRIEF ──
-    summary = {"total":len(clients),"aum":total_aum,"hni":len(hni),
-               "churn":len(at_risk),"no_sip":len(no_sip),"top":top}
-    with st.spinner("Generating intelligence brief..."):
-        if "ai_brief" not in st.session_state or st.session_state.get("ai_stale"):
-            brief = get_ai_brief(clients, summary)
-            st.session_state.ai_brief = brief
-            st.session_state.ai_stale = False
-        else:
-            brief = st.session_state.ai_brief
+    # ── 3 CHARTS ──
+    import plotly.graph_objects as go
 
-    st.markdown(f"""
-    <div class="ai-brief">
-      <div class="ai-brief-header">
-        <span class="ai-pill">◆ AI Intelligence Brief</span>
-        <span class="ai-model-tag">claude-sonnet · fresh every session · {random.choice(['Revenue angle','Risk angle','Relationship angle','Growth angle','Pattern angle'])}</span>
-      </div>
-      <div class="ai-text">{brief}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    DARK_BG  = "#111318"
+    DARK_SUR = "#181c22"
+    DARK_BD  = "#1f2535"
+    FONT_CLR = "#8892a8"
+    TEXT_CLR = "#e8eaf0"
 
-    c_refresh, _ = st.columns([1,5])
-    with c_refresh:
-        if st.button("Refresh brief ↺"):
-            st.session_state.ai_stale = True
-            st.rerun()
+    chart_cfg = dict(
+        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_SUR,
+        font=dict(family="Space Grotesk, sans-serif", color=FONT_CLR, size=12),
+        margin=dict(l=12, r=12, t=36, b=12),
+        showlegend=False,
+        xaxis=dict(showgrid=False, zeroline=False, color=FONT_CLR,
+                   tickfont=dict(size=11), linecolor=DARK_BD),
+        yaxis=dict(showgrid=True, gridcolor=DARK_BD, zeroline=False,
+                   color=FONT_CLR, tickfont=dict(size=11)),
+    )
+
+    gc1, gc2, gc3 = st.columns(3)
+
+    # Chart 1 — Portfolio by priority segment (bar)
+    with gc1:
+        seg_labels = ["High", "Medium", "Low"]
+        seg_colors = ["#00d97e", "#ffb340", "#ff4d6a"]
+        seg_vals = [
+            sum(num(c.get("portfolio",0)) for c in clients if c.get("priority")=="High") / 1e5,
+            sum(num(c.get("portfolio",0)) for c in clients if c.get("priority")=="Medium") / 1e5,
+            sum(num(c.get("portfolio",0)) for c in clients if c.get("priority")=="Low") / 1e5,
+        ]
+        fig1 = go.Figure(go.Bar(
+            x=seg_labels, y=[round(v,1) for v in seg_vals],
+            marker_color=seg_colors, marker_line_width=0,
+            text=[f"₹{v:.1f}L" for v in seg_vals],
+            textposition="outside", textfont=dict(color=TEXT_CLR, size=11),
+        ))
+        fig1.update_layout(**{**chart_cfg, "title":dict(text="Portfolio by client status", font=dict(size=13, color=TEXT_CLR), x=0)})
+        fig1.update_traces(width=0.5)
+        st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar":False})
+
+    # Chart 2 — Health score distribution (histogram)
+    with gc2:
+        scores = [c.get("score",0) for c in clients]
+        bins = [0,20,40,60,80,101]
+        labels_h = ["0-20","21-40","41-60","61-80","81-100"]
+        counts_h = [sum(1 for s in scores if bins[i]<=s<bins[i+1]) for i in range(5)]
+        clrs_h = ["#ff4d6a","#ff4d6a","#ffb340","#00d97e","#00d97e"]
+        fig2 = go.Figure(go.Bar(
+            x=labels_h, y=counts_h,
+            marker_color=clrs_h, marker_line_width=0,
+            text=counts_h, textposition="outside",
+            textfont=dict(color=TEXT_CLR, size=11),
+        ))
+        fig2.update_layout(**{**chart_cfg, "title":dict(text="Client health score spread", font=dict(size=13, color=TEXT_CLR), x=0)})
+        fig2.update_traces(width=0.6)
+        st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar":False})
+
+    # Chart 3 — Leaving risk vs Health score (scatter)
+    with gc3:
+        sc_x = [c.get("score",0) for c in clients]
+        ch_y = [c.get("churn",0) for c in clients]
+        names_s = [c.get("name","") for c in clients]
+        clrs_s = ["#ff4d6a" if c.get("churn",0)>50 else ("#ffb340" if c.get("churn",0)>25 else "#00d97e") for c in clients]
+        fig3 = go.Figure(go.Scatter(
+            x=sc_x, y=ch_y, mode="markers",
+            marker=dict(color=clrs_s, size=9, line=dict(width=0)),
+            text=names_s, hovertemplate="<b>%{text}</b><br>Health: %{x}<br>Risk: %{y}%<extra></extra>",
+        ))
+        fig3.update_layout(**{**chart_cfg,
+            "title":dict(text="Health score vs leaving risk", font=dict(size=13, color=TEXT_CLR), x=0),
+            "xaxis":dict(**chart_cfg["xaxis"], title="Health score", range=[0,105]),
+            "yaxis":dict(**chart_cfg["yaxis"], title="Leaving risk %", range=[0,105]),
+        })
+        st.plotly_chart(fig3, use_container_width=True, config={"displayModeBar":False})
 
     # ── TABS ──
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -1125,10 +1205,10 @@ def show_dashboard(clients):
 
             with c_b:
                 tmpls = {
-                    "Check-in call request": f"Dear {sel.get('name','')},\n\nI've been reviewing your portfolio and wanted to personally connect — there are a few market developments that are relevant to your investments.\n\nCould we schedule a quick 20-minute call this week at your convenience?\n\nWarm regards,\nKartik Dadia\nAditya Finoptions",
-                    "SIP proposal": f"Dear {sel.get('name','')},\n\nBased on your current portfolio of {fmt_inr(sel.get('portfolio',0))}, I've put together a personalised SIP plan that could significantly grow your wealth over the next 10 years.\n\nThe numbers are quite compelling — can we find 15 minutes to walk through it?\n\nWarm regards,\nKartik Dadia\nAditya Finoptions",
-                    "Portfolio review": f"Dear {sel.get('name','')},\n\nYour annual portfolio review is due. Given current market conditions, I want to make sure your investments are optimally positioned for the year ahead.\n\nI've already done the analysis — when works best for a quick call?\n\nWarm regards,\nKartik Dadia\nAditya Finoptions",
-                    "Nominee update": f"Dear {sel.get('name','')},\n\nAs part of our annual client care review, I noticed your nominee details may need to be updated — this is important to protect your family's interests.\n\nIt takes under 10 minutes. May I help you with this?\n\nWarm regards,\nKartik Dadia\nAditya Finoptions",
+                    "Check-in call request": f"Dear {sel.get('name','')},\n\nI've been reviewing your portfolio and wanted to personally connect — there are a few market developments that are relevant to your investments.\n\nCould we schedule a quick 20-minute call this week at your convenience?\n\nWarm regards,\n{st.session_state.get('user_name','Your Advisor')}\n{st.session_state.get('user_company','')}",
+                    "SIP proposal": f"Dear {sel.get('name','')},\n\nBased on your current portfolio of {fmt_inr(sel.get('portfolio',0))}, I've put together a personalised SIP plan that could significantly grow your wealth over the next 10 years.\n\nThe numbers are quite compelling — can we find 15 minutes to walk through it?\n\nWarm regards,\n{st.session_state.get('user_name','Your Advisor')}\n{st.session_state.get('user_company','')}",
+                    "Portfolio review": f"Dear {sel.get('name','')},\n\nYour annual portfolio review is due. Given current market conditions, I want to make sure your investments are optimally positioned for the year ahead.\n\nI've already done the analysis — when works best for a quick call?\n\nWarm regards,\n{st.session_state.get('user_name','Your Advisor')}\n{st.session_state.get('user_company','')}",
+                    "Nominee update": f"Dear {sel.get('name','')},\n\nAs part of our annual client care review, I noticed your nominee details may need to be updated — this is important to protect your family's interests.\n\nIt takes under 10 minutes. May I help you with this?\n\nWarm regards,\n{st.session_state.get('user_name','Your Advisor')}\n{st.session_state.get('user_company','')}",
                 }
                 edited = st.text_area("Edit message before sending", tmpls[msg_type], height=220)
                 wa_text = edited.replace("\n","%0A").replace(" ","%20")
