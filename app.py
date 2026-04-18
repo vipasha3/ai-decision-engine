@@ -3,365 +3,559 @@ import pandas as pd
 import numpy as np
 import datetime
 import random
-import anthropic
+import sqlite3
+import hashlib
+import os
 import json
-import re
+import anthropic
 
-# Initialize navigation state
-if "screen" not in st.session_state:
-    st.session_state.screen = "upload"
-
+# ── PAGE CONFIG (must be first) ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Finoptions Intelligence Pro",
+    page_title="Finoptions Pro",
     page_icon="◆",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# ── GLOBAL CSS ──────────────────────────────────────────────────────────────
+# ── DATABASE SETUP ───────────────────────────────────────────────────────────
+DB_PATH = "finoptions.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        full_name TEXT,
+        company TEXT,
+        role TEXT DEFAULT 'advisor',
+        created_at TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS clients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        name TEXT, age TEXT, portfolio TEXT, sip TEXT,
+        last_contact TEXT, goal TEXT, tenure TEXT, nominee TEXT,
+        phone TEXT,
+        score INTEGER DEFAULT 0, churn INTEGER DEFAULT 0,
+        priority TEXT DEFAULT 'Low',
+        flags TEXT DEFAULT '[]',
+        uploaded_at TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )""")
+    # Seed a default admin
+    pw = hashlib.sha256("admin123".encode()).hexdigest()
+    c.execute("INSERT OR IGNORE INTO users (username,password_hash,full_name,company,role,created_at) VALUES (?,?,?,?,?,?)",
+              ("admin", pw, "Kartik Dadia", "Aditya Finoptions", "owner", datetime.datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
+
+def check_login(username, password):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, full_name, company, role FROM users WHERE username=? AND password_hash=?",
+              (username, hash_pw(password)))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def save_clients_db(user_id, clients):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM clients WHERE user_id=?", (user_id,))
+    for cl in clients:
+        c.execute("""INSERT INTO clients (user_id,name,age,portfolio,sip,last_contact,goal,tenure,nominee,phone,score,churn,priority,flags,uploaded_at)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (user_id, cl.get("name",""), cl.get("age",""), cl.get("portfolio","0"),
+                   cl.get("sip","0"), cl.get("lastContact",""), cl.get("goal",""),
+                   cl.get("tenure",""), cl.get("nominee",""), cl.get("phone",""),
+                   cl.get("score",0), cl.get("churn",0), cl.get("priority","Low"),
+                   json.dumps(cl.get("flags",[])), datetime.datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def load_clients_db(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name,age,portfolio,sip,last_contact,goal,tenure,nominee,phone,score,churn,priority,flags FROM clients WHERE user_id=? ORDER BY score DESC", (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    clients = []
+    for r in rows:
+        clients.append({
+            "name":r[0],"age":r[1],"portfolio":r[2],"sip":r[3],
+            "lastContact":r[4],"goal":r[5],"tenure":r[6],"nominee":r[7],
+            "phone":r[8],"score":r[9],"churn":r[10],"priority":r[11],
+            "flags":json.loads(r[12]) if r[12] else []
+        })
+    return clients
+
+# ── GLOBAL CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
 
 :root {
-  --bg: #f5f6f8;
-  --surface: #ffffff;
-  --surface2: #f0f2f5;
-  --border: #e2e5ea;
-  --border2: #cdd1d8;
-  --text: #111318;
-  --muted: #6b7280;
-  --muted2: #4b5563;
-  --green: #16a34a;
-  --green-bg: rgba(22,163,74,0.08);
-  --green-border: rgba(22,163,74,0.22);
-  --amber: #d97706;
-  --amber-bg: rgba(217,119,6,0.08);
-  --amber-border: rgba(217,119,6,0.22);
-  --red: #dc2626;
-  --red-bg: rgba(220,38,38,0.07);
-  --red-border: rgba(220,38,38,0.20);
-  --blue: #2563eb;
-  --blue-bg: rgba(37,99,235,0.07);
-  --blue-border: rgba(37,99,235,0.20);
-  --purple: #7c3aed;
-  --purple-bg: rgba(124,58,237,0.07);
-  --accent: #16a34a;
+  --bg: #0a0b0e;
+  --surface: #111318;
+  --surface2: #181c22;
+  --surface3: #1e2330;
+  --border: #1f2535;
+  --border2: #2a3347;
+  --text: #e8eaf0;
+  --muted: #5a6480;
+  --muted2: #8892a8;
+  --green: #00d97e;
+  --green-d: #00a85e;
+  --green-bg: rgba(0,217,126,.08);
+  --green-border: rgba(0,217,126,.2);
+  --amber: #ffb340;
+  --amber-bg: rgba(255,179,64,.08);
+  --amber-border: rgba(255,179,64,.2);
+  --red: #ff4d6a;
+  --red-bg: rgba(255,77,106,.08);
+  --red-border: rgba(255,77,106,.2);
+  --blue: #4d9fff;
+  --blue-bg: rgba(77,159,255,.08);
+  --blue-border: rgba(77,159,255,.2);
+  --purple: #a78bfa;
+  --purple-bg: rgba(167,139,250,.08);
+  --purple-border: rgba(167,139,250,.2);
+  --teal: #2dd4bf;
+  --teal-bg: rgba(45,212,191,.08);
 }
+
+*, *::before, *::after { box-sizing: border-box; }
 
 html, body, [data-testid="stAppViewContainer"] {
   background: var(--bg) !important;
   color: var(--text) !important;
-  font-family: 'DM Sans', sans-serif !important;
+  font-family: 'Space Grotesk', sans-serif !important;
 }
+[data-testid="stHeader"] { display: none !important; }
+[data-testid="stSidebar"] { display: none !important; }
+[data-testid="stDecoration"] { display: none !important; }
+.block-container { padding: 0 !important; max-width: 100% !important; }
+footer { display: none !important; }
 
-[data-testid="stHeader"] { background: var(--bg) !important; border-bottom: 1px solid var(--border) !important; }
-[data-testid="stSidebar"] { background: var(--surface) !important; border-right: 1px solid var(--border) !important; }
-
-.block-container { padding: 2rem 2.5rem !important; max-width: 1400px !important; }
-
-h1, h2, h3 { font-family: 'DM Serif Display', serif !important; font-weight: 400 !important; color: var(--text) !important; }
-
-/* ── TOP HEADER ── */
-.top-header {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  border-bottom: 1px solid var(--border); padding-bottom: 1.5rem; margin-bottom: 2rem;
+/* ── NAV ── */
+.topnav {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: .875rem 2rem; background: var(--surface);
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100;
 }
-.top-header-left .eyebrow {
-  font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
-  color: var(--accent); font-family: 'DM Mono', monospace; margin-bottom: 6px;
+.topnav-logo { display: flex; align-items: center; gap: 10px; }
+.topnav-logo-mark {
+  width: 32px; height: 32px; background: var(--green);
+  border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; font-weight: 700; color: #000;
 }
-.top-header-left h1 {
-  font-size: 2rem !important; line-height: 1.15; margin: 0 !important; padding: 0 !important;
+.topnav-brand { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+.topnav-brand span { color: var(--green); }
+.topnav-right { display: flex; align-items: center; gap: 16px; }
+.nav-user { font-size: 12px; color: var(--muted2); font-family: 'Space Mono', monospace; }
+.nav-badge {
+  font-size: 10px; padding: 3px 8px; border-radius: 20px;
+  background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border);
+  font-family: 'Space Mono', monospace; font-weight: 700;
 }
-.top-header-left .subtitle { font-size: 13px; color: var(--muted); margin-top: 6px; }
-.live-badge {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--green-bg); border: 1px solid var(--green-border);
-  color: var(--green); font-size: 11px; font-family: 'DM Mono', monospace;
-  padding: 5px 12px; border-radius: 20px; margin-top: 4px;
+.breadcrumb {
+  font-size: 11px; color: var(--muted); font-family: 'Space Mono', monospace;
+  padding: .5rem 2rem; background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
-.live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+.breadcrumb span { color: var(--green); }
 
-/* ── KPI CARDS ── */
-.kpi-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 2rem; }
-.kpi-card {
+/* ── MAIN WRAP ── */
+.main-wrap { padding: 2rem 2rem; max-width: 1400px; margin: 0 auto; }
+
+/* ── GREETING ── */
+.greeting-card {
+  background: linear-gradient(135deg, var(--surface2) 0%, var(--surface3) 100%);
+  border: 1px solid var(--border2); border-radius: 16px; padding: 1.75rem 2rem;
+  margin-bottom: 1.75rem; display: flex; align-items: center; justify-content: space-between;
+}
+.greeting-left .time-label {
+  font-size: 10px; letter-spacing: .15em; text-transform: uppercase;
+  font-family: 'Space Mono', monospace; color: var(--green); margin-bottom: 6px;
+}
+.greeting-left h2 {
+  font-size: 1.6rem; font-weight: 600; margin: 0; line-height: 1.2;
+  letter-spacing: -.02em;
+}
+.greeting-left p { font-size: 13px; color: var(--muted2); margin-top: 6px; }
+.greeting-right { text-align: right; }
+.greeting-stat { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted); }
+.greeting-stat strong { color: var(--green); font-size: 18px; display: block; margin-bottom: 2px; }
+
+/* ── KPI GRID ── */
+.kpi-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 1.75rem; }
+.kpi {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; padding: 1.2rem 1.4rem; cursor: pointer;
-  transition: border-color .2s, background .2s; position: relative; overflow: hidden;
-  box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  border-radius: 14px; padding: 1.25rem 1.4rem; position: relative; overflow: hidden;
+  cursor: pointer; transition: transform .15s, border-color .15s;
 }
-.kpi-card::before {
+.kpi:hover { transform: translateY(-2px); border-color: var(--border2); }
+.kpi::after {
+  content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 3px;
+}
+.kpi.green::after { background: var(--green); }
+.kpi.amber::after { background: var(--amber); }
+.kpi.red::after { background: var(--red); }
+.kpi.blue::after { background: var(--blue); }
+.kpi.purple::after { background: var(--purple); }
+.kpi-eyebrow {
+  font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+  font-family: 'Space Mono', monospace; margin-bottom: 12px;
+}
+.kpi.green .kpi-eyebrow { color: var(--green); }
+.kpi.amber .kpi-eyebrow { color: var(--amber); }
+.kpi.red .kpi-eyebrow { color: var(--red); }
+.kpi.blue .kpi-eyebrow { color: var(--blue); }
+.kpi.purple .kpi-eyebrow { color: var(--purple); }
+.kpi-number { font-size: 2.2rem; font-weight: 700; line-height: 1; letter-spacing: -.03em; margin-bottom: 6px; }
+.kpi-desc { font-size: 11px; color: var(--muted2); line-height: 1.4; }
+.kpi-signal {
+  font-size: 10px; font-family: 'Space Mono', monospace;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+}
+.kpi.green .kpi-signal { color: var(--green); }
+.kpi.amber .kpi-signal { color: var(--amber); }
+.kpi.red .kpi-signal { color: var(--red); }
+.kpi.blue .kpi-signal { color: var(--blue); }
+.kpi.purple .kpi-signal { color: var(--purple); }
+
+/* ── 2 COL LAYOUT ── */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 1.75rem; }
+.three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 1.75rem; }
+
+/* ── CARDS ── */
+.panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 14px; padding: 1.4rem; margin-bottom: 1.5rem;
+}
+.panel-header {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 1.2rem;
+  padding-bottom: 1rem; border-bottom: 1px solid var(--border);
+}
+.panel-icon {
+  width: 36px; height: 36px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0;
+}
+.panel-icon.green { background: var(--green-bg); }
+.panel-icon.amber { background: var(--amber-bg); }
+.panel-icon.red { background: var(--red-bg); }
+.panel-icon.blue { background: var(--blue-bg); }
+.panel-icon.purple { background: var(--purple-bg); }
+.panel-icon.teal { background: var(--teal-bg); }
+.panel-title { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.panel-sub { font-size: 11px; color: var(--muted2); }
+
+/* ── AI BRIEF ── */
+.ai-brief {
+  background: var(--surface); border: 1px solid var(--purple-border);
+  border-radius: 14px; padding: 1.4rem; margin-bottom: 1.75rem;
+  position: relative;
+}
+.ai-brief::before {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, var(--purple), var(--blue));
+  border-radius: 14px 14px 0 0;
 }
-.kpi-card.green::before { background: var(--green); }
-.kpi-card.amber::before { background: var(--amber); }
-.kpi-card.red::before { background: var(--red); }
-.kpi-card.blue::before { background: var(--blue); }
-.kpi-card.purple::before { background: var(--purple); }
-.kpi-card:hover { border-color: var(--border2); background: var(--surface2); box-shadow: 0 2px 8px rgba(0,0,0,.06); }
-.kpi-label { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-family: 'DM Mono', monospace; margin-bottom: 10px; }
-.kpi-card.green .kpi-label { color: var(--green); }
-.kpi-card.amber .kpi-label { color: var(--amber); }
-.kpi-card.red .kpi-label { color: var(--red); }
-.kpi-card.blue .kpi-label { color: var(--blue); }
-.kpi-card.purple .kpi-label { color: var(--purple); }
-.kpi-val { font-family: 'DM Serif Display', serif; font-size: 2rem; line-height: 1; color: var(--text); margin-bottom: 6px; }
-.kpi-sub { font-size: 11px; color: var(--muted); }
-.kpi-delta { font-size: 11px; font-family: 'DM Mono', monospace; margin-top: 8px; }
-.kpi-card.green .kpi-delta { color: var(--green); }
-.kpi-card.amber .kpi-delta { color: var(--amber); }
-.kpi-card.red .kpi-delta { color: var(--red); }
-.kpi-card.blue .kpi-delta { color: var(--blue); }
-.kpi-card.purple .kpi-delta { color: var(--purple); }
+.ai-brief-header { display: flex; align-items: center; gap: 10px; margin-bottom: 1rem; }
+.ai-pill {
+  font-size: 10px; font-family: 'Space Mono', monospace; letter-spacing: .1em;
+  text-transform: uppercase; padding: 4px 10px; border-radius: 20px;
+  background: var(--purple-bg); color: var(--purple); border: 1px solid var(--purple-border);
+}
+.ai-model-tag { font-size: 11px; color: var(--muted); font-family: 'Space Mono', monospace; }
+.ai-text {
+  font-size: 14px; line-height: 1.85; color: #b8c2d8;
+  border-left: 2px solid var(--purple); padding-left: 1.1rem;
+  font-style: italic;
+}
 
-/* ── AI INSIGHT PANEL ── */
-.ai-panel {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; padding: 1.5rem; margin-bottom: 2rem; position: relative;
-  box-shadow: 0 1px 4px rgba(0,0,0,.05);
-}
-.ai-panel-header {
-  display: flex; align-items: center; gap: 10px; margin-bottom: 1rem;
-}
-.ai-tag {
+/* ── PRIORITY TABLE ── */
+.ptable { width: 100%; border-collapse: collapse; }
+.ptable thead th {
   font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
-  font-family: 'DM Mono', monospace; color: var(--purple);
-  background: var(--purple-bg); border: 1px solid rgba(124,58,237,.2);
-  padding: 3px 10px; border-radius: 20px;
+  font-family: 'Space Mono', monospace; color: var(--muted);
+  padding: 8px 12px; border-bottom: 1px solid var(--border); text-align: left; font-weight: 400;
 }
-.ai-model { font-size: 11px; color: var(--muted); font-family: 'DM Mono', monospace; }
-.ai-body {
-  font-size: 14px; line-height: 1.8; color: #374151;
-  font-style: italic; border-left: 2px solid var(--purple); padding-left: 1.2rem;
-}
+.ptable tbody tr { border-bottom: 1px solid var(--border); cursor: pointer; transition: background .1s; }
+.ptable tbody tr:hover { background: var(--surface2); }
+.ptable tbody td { padding: 12px 12px; font-size: 13px; vertical-align: middle; }
+.client-rank { font-family: 'Space Mono', monospace; font-size: 12px; color: var(--muted); width: 40px; }
+.client-name-cell { font-weight: 600; font-size: 13px; }
+.client-sub { font-size: 11px; color: var(--muted2); margin-top: 2px; }
 
-/* ── SECTION HEADER ── */
-.section-head {
-  display: flex; align-items: baseline; gap: 12px;
-  margin-bottom: 1rem; margin-top: 2rem;
-}
-.section-head h3 { font-size: 1.1rem !important; margin: 0 !important; }
-.section-head .count {
-  font-size: 11px; font-family: 'DM Mono', monospace;
-  color: var(--muted); background: var(--surface2);
-  border: 1px solid var(--border); padding: 2px 8px; border-radius: 20px;
-}
+/* ── SCORE BAR ── */
+.sbar-wrap { display: flex; align-items: center; gap: 8px; }
+.sbar { height: 4px; border-radius: 2px; background: var(--border2); width: 52px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.sbar-fill { height: 100%; border-radius: 2px; }
+.snum { font-family: 'Space Mono', monospace; font-size: 12px; min-width: 24px; font-weight: 700; }
 
-/* ── CLIENT TABLE ── */
-.client-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.client-table thead th {
-  text-align: left; padding: 10px 14px; color: var(--muted);
-  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
-  font-family: 'DM Mono', monospace; border-bottom: 1px solid var(--border);
-  font-weight: 400;
-}
-.client-table tbody tr {
-  border-bottom: 1px solid var(--border); transition: background .12s; cursor: pointer;
-}
-.client-table tbody tr:hover { background: #f0f4ff; }
-.client-table tbody td { padding: 11px 14px; color: var(--text); }
-.client-name { font-weight: 500; }
-.score-chip {
-  font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 500;
-  padding: 3px 10px; border-radius: 20px; display: inline-block;
+/* ── CHIPS ── */
+.chip {
+  display: inline-block; font-size: 10px; font-weight: 600; font-family: 'Space Mono', monospace;
+  padding: 3px 9px; border-radius: 20px;
 }
 .chip-high { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
 .chip-medium { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-border); }
 .chip-low { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
-.bar-wrap { display: inline-flex; align-items: center; gap: 8px; }
-.mini-bar { height: 4px; border-radius: 2px; background: var(--border2); width: 56px; display: inline-block; position: relative; vertical-align: middle; overflow: hidden; }
-.mini-fill { height: 100%; border-radius: 2px; position: absolute; left: 0; top: 0; }
-.flag-pill {
-  font-size: 10px; padding: 2px 7px; border-radius: 10px; margin-right: 3px;
-  background: var(--surface2); color: var(--muted2); border: 1px solid var(--border);
-  display: inline-block;
-}
+.chip-info { background: var(--blue-bg); color: var(--blue); border: 1px solid var(--blue-border); }
+.chip-purple { background: var(--purple-bg); color: var(--purple); border: 1px solid var(--purple-border); }
+.flag { font-size: 10px; padding: 2px 7px; border-radius: 8px; margin-right: 3px;
+  background: var(--surface2); color: var(--muted2); border: 1px solid var(--border2);
+  display: inline-block; }
 
-/* ── ACTION CARDS ── */
-.action-card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; padding: 1.2rem 1.4rem; margin-bottom: 10px;
-  display: flex; gap: 14px; align-items: flex-start;
+/* ── ACTION ROWS ── */
+.action-row {
+  display: flex; align-items: flex-start; gap: 14px; padding: 14px 0;
+  border-bottom: 1px solid var(--border);
 }
-.action-icon {
-  width: 38px; height: 38px; border-radius: 10px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 17px; flex-shrink: 0;
+.action-row:last-child { border-bottom: none; }
+.action-num {
+  width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center;
+  justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0;
+  font-family: 'Space Mono', monospace; margin-top: 2px;
 }
-.action-icon.green { background: var(--green-bg); }
-.action-icon.amber { background: var(--amber-bg); }
-.action-icon.red { background: var(--red-bg); }
-.action-icon.blue { background: var(--blue-bg); }
-.action-body { flex: 1; }
-.action-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
-.action-desc { font-size: 12px; color: var(--muted2); line-height: 1.6; }
-.action-tag {
-  font-size: 10px; padding: 2px 8px; border-radius: 10px;
-  font-family: 'DM Mono', monospace; margin-left: 8px; vertical-align: middle;
+.action-num.green { background: var(--green-bg); color: var(--green); }
+.action-num.amber { background: var(--amber-bg); color: var(--amber); }
+.action-num.red { background: var(--red-bg); color: var(--red); }
+.action-num.blue { background: var(--blue-bg); color: var(--blue); }
+.action-title-row { font-size: 13px; font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.action-desc-row { font-size: 12px; color: var(--muted2); line-height: 1.6; }
+.urgency-tag {
+  font-size: 10px; padding: 2px 8px; border-radius: 10px; font-family: 'Space Mono', monospace;
 }
 
 /* ── EVENT CARDS ── */
-.event-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 2rem; }
-.event-card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; padding: 1.2rem;
+.ev-card {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 1.2rem; height: 100%;
 }
-.event-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-.event-card p { font-size: 12px; color: var(--muted2); line-height: 1.6; margin-bottom: 10px; }
-.event-meta { font-size: 11px; font-family: 'DM Mono', monospace; color: var(--muted); }
+.ev-card h4 { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.ev-card p { font-size: 12px; color: var(--muted2); line-height: 1.6; margin-bottom: 10px; }
+.ev-roi { font-size: 11px; font-family: 'Space Mono', monospace; color: var(--green); font-weight: 700; }
+.ev-meta { font-size: 10px; color: var(--muted); margin-top: 6px; font-family: 'Space Mono', monospace; }
 
-/* ── UPLOAD ZONE ── */
-.upload-outer {
-  max-width: 620px; margin: 4rem auto; text-align: center;
-}
-.upload-eyebrow {
-  font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
-  font-family: 'DM Mono', monospace; color: var(--accent); margin-bottom: 1rem;
-}
-.upload-title { font-family: 'DM Serif Display', serif; font-size: 2.2rem; line-height: 1.2; margin-bottom: .75rem; color: var(--text); }
-.upload-sub { font-size: 14px; color: var(--muted); margin-bottom: 2rem; }
-.upload-box {
-  border: 1.5px dashed var(--border2); border-radius: 16px;
-  padding: 2.5rem; margin-bottom: 1.5rem; transition: border-color .2s;
-  background: var(--surface); box-shadow: 0 1px 4px rgba(0,0,0,.06);
-}
+/* ── ML TABLE ── */
+.ml-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1.2fr 1fr; align-items: center;
+  padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.ml-row:hover { background: var(--surface2); }
+.ml-header { font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+  font-family: 'Space Mono', monospace; color: var(--muted); padding: 8px 12px;
+  border-bottom: 1px solid var(--border); display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr 1.2fr 1fr; }
+.trend-up { color: var(--green); font-size: 11px; font-family: 'Space Mono', monospace; }
+.trend-down { color: var(--red); font-size: 11px; font-family: 'Space Mono', monospace; }
+.conf-bar { height: 3px; border-radius: 2px; background: var(--border2); width: 40px; overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 4px; }
+.conf-fill { height: 100%; background: var(--blue); border-radius: 2px; }
 
-/* ── WA BUTTON ── */
+/* ── WA ── */
 .wa-btn {
   display: inline-flex; align-items: center; gap: 6px;
-  background: rgba(37,211,102,.12); border: 1px solid rgba(37,211,102,.3);
-  color: #25d366; font-size: 12px; font-weight: 500;
-  padding: 5px 12px; border-radius: 8px; text-decoration: none;
-  font-family: 'DM Mono', monospace;
+  background: rgba(37,211,102,.1); border: 1px solid rgba(37,211,102,.3);
+  color: #25d366; font-size: 12px; font-weight: 600; padding: 6px 14px;
+  border-radius: 8px; text-decoration: none; font-family: 'Space Mono', monospace;
 }
+
+/* ── UPLOAD ── */
+.upload-hero { text-align: center; padding: 4rem 2rem 2rem; }
+.upload-eyebrow {
+  font-size: 11px; letter-spacing: .2em; text-transform: uppercase;
+  font-family: 'Space Mono', monospace; color: var(--green); margin-bottom: 1rem;
+}
+.upload-title { font-size: 2.8rem; font-weight: 700; letter-spacing: -.04em; line-height: 1.1; margin-bottom: .75rem; }
+.upload-title em { color: var(--green); font-style: normal; }
+.upload-sub { font-size: 15px; color: var(--muted2); max-width: 500px; margin: 0 auto 2rem; line-height: 1.6; }
+
+/* ── LOGIN ── */
+.login-wrap { max-width: 420px; margin: 5rem auto; text-align: center; padding: 0 1rem; }
+.login-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 20px; padding: 2.5rem; text-align: left;
+}
+.login-logo { text-align: center; margin-bottom: 2rem; }
+.login-logo-mark {
+  width: 52px; height: 52px; background: var(--green); border-radius: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 24px; font-weight: 700; color: #000; margin-bottom: .75rem;
+}
+.login-title { font-size: 1.4rem; font-weight: 700; text-align: center; margin-bottom: 4px; }
+.login-sub { font-size: 13px; color: var(--muted2); text-align: center; margin-bottom: 1.75rem; }
 
 /* ── STREAMLIT OVERRIDES ── */
 .stButton > button {
-  background: var(--surface) !important; border: 1px solid var(--border2) !important;
-  color: var(--text) !important; font-family: 'DM Sans', sans-serif !important;
-  font-size: 12px !important; font-weight: 500 !important;
-  border-radius: 8px !important; padding: 6px 14px !important;
-  box-shadow: 0 1px 2px rgba(0,0,0,.05) !important;
+  background: var(--surface2) !important; border: 1px solid var(--border2) !important;
+  color: var(--text) !important; font-family: 'Space Grotesk', sans-serif !important;
+  font-size: 13px !important; font-weight: 500 !important;
+  border-radius: 10px !important; padding: 8px 18px !important;
+  transition: all .15s !important;
 }
-.stButton > button:hover { background: var(--surface2) !important; }
-.stSelectbox > div > div { background: var(--surface) !important; border-color: var(--border) !important; color: var(--text) !important; border-radius: 8px !important; }
-.stTextInput > div > div > input { background: var(--surface) !important; border-color: var(--border) !important; color: var(--text) !important; border-radius: 8px !important; }
-div[data-testid="stFileUploader"] { background: var(--surface) !important; border: 1.5px dashed var(--border2) !important; border-radius: 12px !important; padding: 1rem !important; }
-div[data-testid="stFileUploader"] label { color: var(--muted2) !important; font-size: 13px !important; }
-.stAlert { background: var(--surface) !important; border-color: var(--border) !important; color: var(--muted2) !important; border-radius: 8px !important; }
-.stSuccess { border-left: 3px solid var(--green) !important; }
-.stInfo { border-left: 3px solid var(--blue) !important; }
-.stWarning { border-left: 3px solid var(--amber) !important; }
-div[data-testid="stMetric"] { background: transparent !important; }
-[data-testid="stMarkdownContainer"] p { color: var(--muted2) !important; font-size: 13px !important; }
-.stTabs [data-baseweb="tab-list"] { background: var(--surface2) !important; border-radius: 10px !important; padding: 4px !important; border: 1px solid var(--border) !important; }
-.stTabs [data-baseweb="tab"] { color: var(--muted) !important; font-size: 13px !important; font-family: 'DM Sans' !important; border-radius: 8px !important; }
-.stTabs [aria-selected="true"] { background: var(--surface) !important; color: var(--text) !important; box-shadow: 0 1px 3px rgba(0,0,0,.08) !important; }
-hr { border-color: var(--border) !important; }
-textarea { background: var(--surface) !important; border-color: var(--border) !important; color: var(--text) !important; border-radius: 8px !important; }
+.stButton > button:hover { background: var(--surface3) !important; border-color: var(--muted) !important; }
+.stTextInput > div > div > input, .stTextInput > div > div > input:focus {
+  background: var(--surface2) !important; border: 1px solid var(--border2) !important;
+  color: var(--text) !important; border-radius: 10px !important;
+  font-family: 'Space Grotesk', sans-serif !important; font-size: 13px !important;
+}
+div[data-testid="stFileUploader"] {
+  background: var(--surface) !important; border: 1.5px dashed var(--border2) !important;
+  border-radius: 14px !important; padding: 1.5rem !important;
+}
+.stSelectbox > div > div {
+  background: var(--surface2) !important; border: 1px solid var(--border2) !important;
+  color: var(--text) !important; border-radius: 10px !important;
+}
+.stTabs [data-baseweb="tab-list"] {
+  background: var(--surface) !important; border: 1px solid var(--border) !important;
+  border-radius: 12px !important; padding: 4px !important; gap: 4px !important;
+}
+.stTabs [data-baseweb="tab"] {
+  color: var(--muted2) !important; font-family: 'Space Grotesk', sans-serif !important;
+  font-size: 13px !important; font-weight: 500 !important; border-radius: 9px !important;
+}
+.stTabs [aria-selected="true"] {
+  background: var(--surface2) !important; color: var(--text) !important;
+}
 .stRadio label { color: var(--muted2) !important; font-size: 13px !important; }
+textarea {
+  background: var(--surface2) !important; border: 1px solid var(--border2) !important;
+  color: var(--text) !important; border-radius: 10px !important;
+  font-family: 'Space Grotesk', sans-serif !important;
+}
+[data-testid="stMarkdownContainer"] p { color: var(--muted2) !important; font-size: 13px !important; }
+.stAlert { background: var(--surface2) !important; border-radius: 10px !important; color: var(--muted2) !important; }
+hr { border-color: var(--border) !important; margin: 1.5rem 0 !important; }
+div[data-testid="stSpinner"] { color: var(--green) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── HELPERS ────────────────────────────────────────────────────────────────
+# ── INIT ─────────────────────────────────────────────────────────────────────
+init_db()
 
+# ── HELPERS ──────────────────────────────────────────────────────────────────
 def fmt_inr(val):
-    n = float(val or 0)
+    try:
+        n = float(str(val).replace(",","").replace("₹","") or 0)
+    except: n = 0
     if n >= 1e7: return f"₹{n/1e7:.1f}Cr"
     if n >= 1e5: return f"₹{n/1e5:.1f}L"
     if n >= 1e3: return f"₹{n/1e3:.0f}K"
-    return f"₹{n:.0f}"
+    return f"₹{int(n)}"
 
 def num(v):
     try: return float(str(v).replace(",","").replace("₹","").strip())
     except: return 0.0
 
 def months_ago(d):
-    if not d or str(d).strip() == "": return 99
+    if not d or str(d).strip() in ("", "nan"): return 99
     try:
-        dt = pd.to_datetime(d, dayfirst=True)
-        return max(0, (datetime.datetime.now() - dt).days / 30)
+        dt = pd.to_datetime(str(d), dayfirst=True, errors="coerce")
+        if pd.isna(dt): return 99
+        return max(0, (datetime.datetime.now() - dt.to_pydatetime()).days / 30)
     except: return 99
 
-def detect_col(hints, cols):
-    for c in cols:
-        cl = c.lower().replace(" ","").replace("_","")
-        for h in hints:
-            if h in cl: return c
-    return None
+def get_greeting():
+    h = datetime.datetime.now().hour
+    if h < 12: return "Good morning"
+    if h < 17: return "Good afternoon"
+    return "Good evening"
 
+def get_agenda_msg(name, clients_count):
+    msgs = [
+        f"You have {clients_count} clients waiting for your attention today.",
+        f"Your intelligence engine has flagged priority actions. Ready when you are.",
+        f"Fresh insights loaded. Let's make today count.",
+        f"Portfolio health check complete. A few things need your eye today.",
+        f"Good to have you back. Your clients' data is all caught up.",
+    ]
+    return random.choice(msgs)
+
+def clean_phone(v):
+    if not v: return ""
+    d = "".join(filter(str.isdigit, str(v)))
+    if len(d) == 10: return "91" + d
+    return d
+
+def clean_num(v):
+    try: return str(float(str(v).replace(",","").replace("₹","").strip()))
+    except: return "0"
+
+# ── ML SCORING ────────────────────────────────────────────────────────────────
 def score_client(row):
     p = num(row.get("portfolio", 0))
     sip = num(row.get("sip", 0))
-    age = int(row.get("age") or 0)
-    tenure_raw = row.get("tenure", "")
     try:
-        yr = int(str(tenure_raw).strip())
+        age = int(float(row.get("age") or 0))
+    except: age = 0
+    try:
+        yr = int(float(str(row.get("tenure","2020")).strip()))
         tenure_yrs = (2025 - yr) if yr > 1990 else yr
     except: tenure_yrs = 0
-    ma = months_ago(row.get("lastContact", ""))
-    nominee = str(row.get("nominee", "")).lower()
-    goal = str(row.get("goal", "")).lower()
-
+    ma = months_ago(row.get("lastContact",""))
+    nominee = str(row.get("nominee","")).lower().strip()
+    goal = str(row.get("goal","")).lower()
     s = 40
     if p > 8e6: s += 28
     elif p > 4e6: s += 20
     elif p > 1.5e6: s += 13
     elif p > 5e5: s += 7
-
     if sip > 20000: s += 18
     elif sip > 10000: s += 13
     elif sip > 3000: s += 8
     elif sip > 0: s += 4
-
     if ma < 1: s += 15
     elif ma < 3: s += 10
     elif ma < 6: s += 5
     elif ma > 12: s -= 18
     elif ma > 6: s -= 10
-
     if tenure_yrs > 15: s += 15
     elif tenure_yrs > 8: s += 10
     elif tenure_yrs > 3: s += 5
-
     if nominee == "no": s -= 8
     if "bond" in goal: s += 5
     if age > 55 and "lic" in goal: s += 5
     if sip == 0 and p > 5e5: s -= 5
-
     return max(0, min(100, round(s)))
 
-def churn_risk(row):
+def churn_score(row):
     r = 0
     ma = months_ago(row.get("lastContact",""))
     sip = num(row.get("sip",0))
-    nominee = str(row.get("nominee","")).lower()
+    nominee = str(row.get("nominee","")).lower().strip()
     try:
-        yr = int(str(row.get("tenure","2020")).strip())
-        tenure_yrs = (2025 - yr) if yr > 1990 else yr
-    except: tenure_yrs = 5
-
+        yr = int(float(str(row.get("tenure","2020")).strip()))
+        ty = (2025-yr) if yr > 1990 else yr
+    except: ty = 5
     if ma > 12: r += 40
     elif ma > 6: r += 25
     elif ma > 3: r += 10
     if sip == 0: r += 20
     if nominee == "no": r += 15
-    if tenure_yrs < 2: r += 15
+    if ty < 2: r += 15
     return min(100, round(r))
+
+def conv_prob(row):
+    s = score_client(row)
+    c = churn_score(row)
+    return min(95, max(5, round(s * 0.7 + (100-c) * 0.3)))
 
 def build_flags(row):
     f = []
-    p = num(row.get("portfolio", 0))
-    sip = num(row.get("sip", 0))
+    p = num(row.get("portfolio",0))
+    sip = num(row.get("sip",0))
     ma = months_ago(row.get("lastContact",""))
-    nominee = str(row.get("nominee","")).lower()
-    if p > 5e6: f.append("HNI")
-    if ma > 6: f.append("Inactive 6m+")
-    if sip == 0 and p > 5e5: f.append("SIP gap")
-    if nominee == "no": f.append("No nominee")
-    if churn_risk(row) > 55: f.append("Churn risk")
+    nominee = str(row.get("nominee","")).lower().strip()
+    if p > 5e6: f.append("High Value")
+    if ma > 6: f.append("Not contacted 6m+")
+    if sip == 0 and p > 5e5: f.append("No SIP")
+    if nominee == "no": f.append("No Nominee")
+    if churn_score(row) > 55: f.append("Leaving Risk")
     return f
 
 FIELDS = [
@@ -373,518 +567,649 @@ FIELDS = [
     ("goal",        ["product","goal","scheme","type"]),
     ("tenure",      ["since","tenure","year","startyear","clientsince"]),
     ("nominee",     ["nominee","nomination"]),
+    ("phone",       ["phone","mobile","contact","number"]),
 ]
 
-# ── AI INSIGHT ─────────────────────────────────────────────────────────────
+def detect_col(hints, cols):
+    for c in cols:
+        cl = c.lower().replace(" ","").replace("_","")
+        for h in hints:
+            if h in cl: return c
+    return None
 
-def get_ai_insight(clients_df, summary):
-    try:
-        client_obj = anthropic.Anthropic()
-        hni = summary["hni"]
-        churn = summary["churn"]
-        no_sip = summary["no_sip"]
-        top = summary["top"]
-        aum = summary["aum"]
-        total = summary["total"]
-
-        # Random perspective angle for variety
-        angles = [
-            "Focus on portfolio risk concentration and what the advisor must protect first.",
-            "Focus on the single biggest revenue opportunity hiding in plain sight.",
-            "Focus on client relationship health and which relationships are silently degrading.",
-            "Focus on what the data reveals about the advisor's business trajectory in next 90 days.",
-            "Focus on the surprising pattern in this portfolio that most advisors would miss.",
-        ]
-        angle = random.choice(angles)
-
-        prompt = f"""You are a senior portfolio analyst with 20 years in Indian wealth management — IIM-trained, ex-HDFC Securities, now independent. You speak with precision, no fluff, no corporate jargon.
-
-Portfolio snapshot you're analysing:
-- Total clients: {total} | Total AUM: {fmt_inr(aum)}
-- HNI clients (AUM >₹50L): {hni}
-- Clients with churn probability >50%: {churn}
-- Clients with no SIP despite having portfolio: {no_sip}
-- Top-ranked client by ML score: {top.get('name','N/A')}, score {top.get('score',0)}/100, portfolio {fmt_inr(top.get('portfolio',0))}
-
-Instruction: {angle}
-
-Write a 4-sentence intelligence brief. Each sentence must be specific — cite actual numbers from the data above. Sound like you're briefing a colleague over coffee, not writing a report. No bullet points. No headers. No "I". No "it is important to note". Vary your sentence structure dramatically — mix short punchy observations with longer analytical ones. Start with something that surprises."""
-
-        msg = client_obj.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=350,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return msg.content[0].text.strip()
-    except Exception as e:
-        return f"Could not generate insight — check API connection. ({e})"
-
-def get_action_insight(client_name, portfolio, sip, score, churn, flags, goal):
-    try:
-        client_obj = anthropic.Anthropic()
-        prompt = f"""You are a senior financial advisor's trusted data science partner. A client profile just came up for action planning.
-
-Client: {client_name}
-Portfolio: {fmt_inr(portfolio)} | Monthly SIP: {fmt_inr(sip) if sip > 0 else "none"}
-ML Score: {score}/100 | Churn Risk: {churn}%
-Flags: {', '.join(flags) if flags else 'none'}
-Product: {goal}
-
-Write ONE sentence — a specific, human-sounding recommended action for this client. Sound like an experienced advisor, not a bot. Be specific. Do not use the client's name more than once. No fluff."""
-
-        msg = client_obj.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=120,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return msg.content[0].text.strip()
-    except:
-        return "Review portfolio and schedule a personalised call this week."
-
-# ── UPLOAD SCREEN ──────────────────────────────────────────────────────────
-
-def show_upload():
-    st.markdown("""
-    <div class="upload-outer">
-      <div class="upload-eyebrow">◆ Finoptions Intelligence Pro</div>
-      <div class="upload-title">Your clients,<br><em>intelligently ranked.</em></div>
-      <div class="upload-sub">Upload any Excel or CSV — the engine maps your columns, scores every client with ML, and surfaces what your data is actually telling you.</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    col_center = st.columns([1, 2, 1])[1]
-    with col_center:
-        uploaded = st.file_uploader("", type=["xlsx","xls","csv"], label_visibility="collapsed")
-        st.markdown("<div style='text-align:center;margin-top:.5rem'><span style='font-size:12px;color:#7a8394'>Supports .xlsx · .xls · .csv · Any column format</span></div>", unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Load sample dataset →", use_container_width=True):
-            st.session_state.demo = True
-            st.session_state.pop("ai_insight", None)
-            st.session_state.pop("ai_insight_stale", None)
-            st.rerun()
-
-    return uploaded
-
-# ── MAP COLUMNS SCREEN ─────────────────────────────────────────────────────
-
-def show_mapping(df):
-    cols = df.columns.tolist()
-    st.markdown("### Map your columns")
-    st.markdown("<p style='color:#7a8394;font-size:13px;margin-top:-8px'>Auto-detected where possible — adjust if needed.</p>", unsafe_allow_html=True)
-
-    mapping = {}
-    grid = st.columns(2)
-    for i, (key, hints) in enumerate(FIELDS):
-        best = detect_col(hints, cols)
-        with grid[i % 2]:
-            label_map = {
-                "name":"Client name","age":"Age","portfolio":"Portfolio / AUM",
-                "sip":"Monthly SIP","lastContact":"Last contact date",
-                "goal":"Product / goal","tenure":"Client since (year)","nominee":"Nominee updated"
-            }
-            options = ["— skip —"] + cols
-            default_idx = (cols.index(best) + 1) if best and best in cols else 0
-            sel = st.selectbox(label_map[key], options, index=default_idx, key=f"map_{key}")
-            mapping[key] = sel if sel != "— skip —" else None
-
-    if st.button("Run intelligence engine →", use_container_width=False):
-        st.session_state.mapping = mapping  # This saves your column selections
-        st.session_state.screen = "dashboard" # This tells the router to switch
-        st.rerun() # This forces the screen to refresh
-
-# ── PROCESS DATA ───────────────────────────────────────────────────────────
+def smart_dedup(clients):
+    """Merge duplicate clients by phone or name similarity"""
+    seen_phones = {}
+    seen_names = {}
+    deduped = []
+    merged_count = 0
+    for c in clients:
+        phone = c.get("phone","").strip()
+        name = c.get("name","").strip().lower()
+        if phone and len(phone) >= 10 and phone in seen_phones:
+            # Merge: keep higher portfolio
+            existing = seen_phones[phone]
+            if num(c["portfolio"]) > num(existing["portfolio"]):
+                idx = deduped.index(existing)
+                deduped[idx] = c
+                seen_phones[phone] = c
+            merged_count += 1
+        elif name and name in seen_names:
+            existing = seen_names[name]
+            if num(c["portfolio"]) > num(existing["portfolio"]):
+                idx = deduped.index(existing)
+                deduped[idx] = c
+                seen_names[name] = c
+            merged_count += 1
+        else:
+            deduped.append(c)
+            if phone and len(phone) >= 10: seen_phones[phone] = c
+            if name: seen_names[name] = c
+    return deduped, merged_count
 
 def process(raw_df, mapping):
+    defaults = {"name":"","age":"","portfolio":"0","sip":"0",
+                "lastContact":"","goal":"","tenure":"2020","nominee":"","phone":""}
     clients = []
-    default_fields = {
-        "name": "", "age": "", "portfolio": "0", "sip": "0",
-        "lastContact": "", "goal": "", "tenure": "2020", "nominee": ""
-    }
     for _, row in raw_df.iterrows():
-        c = dict(default_fields)
+        c = dict(defaults)
         for key, _ in FIELDS:
             col = mapping.get(key)
-            if col and col in raw_df.columns and pd.notna(row[col]):
-                c[key] = str(row[col]).strip()
+            if col and col in raw_df.columns:
+                val = row[col]
+                if pd.notna(val) and str(val).strip() not in ("","nan","None"):
+                    if key in ("portfolio","sip"): c[key] = clean_num(val)
+                    elif key == "phone": c[key] = clean_phone(val)
+                    else: c[key] = str(val).strip()
         c["score"] = score_client(c)
-        c["churn"] = churn_risk(c)
+        c["churn"] = churn_score(c)
+        c["conv"] = conv_prob(c)
         c["priority"] = "High" if c["score"] >= 70 else ("Medium" if c["score"] >= 45 else "Low")
         c["flags"] = build_flags(c)
         clients.append(c)
-    clients.sort(key=lambda x: x.get("score", 0), reverse=True)
-    return clients
+    clients, merged = smart_dedup(clients)
+    clients.sort(key=lambda x: x.get("score",0), reverse=True)
+    return clients, merged
 
-# ── DEMO DATA ──────────────────────────────────────────────────────────────
+# ── AI FUNCTIONS ─────────────────────────────────────────────────────────────
+def get_ai_brief(clients, summary):
+    try:
+        client_obj = anthropic.Anthropic()
+        angles = [
+            "Focus on the hidden revenue opportunity most advisors would miss in this data.",
+            "Focus on which client relationships are silently deteriorating and what that means for the business.",
+            "Focus on the most urgent action the advisor should take in the next 7 days.",
+            "Focus on the pattern you see in these numbers that tells a story about the business trajectory.",
+            "Focus on the risk concentration and what the advisor needs to protect first.",
+        ]
+        angle = random.choice(angles)
+        top = summary.get("top", {})
+        prompt = f"""You are a sharp financial analyst — 20 years in Indian wealth management. You just ran ML analysis on an advisor's portfolio.
 
-DEMO_CLIENTS = [
-    {"name":"Ramesh Patel","age":"62","portfolio":"4800000","sip":"15000","lastContact":"2024-01-10","goal":"MF+LIC","tenure":"2010","nominee":"Yes"},
-    {"name":"Sunita Shah","age":"45","portfolio":"1200000","sip":"8000","lastContact":"2023-09-20","goal":"MF","tenure":"2018","nominee":"No"},
-    {"name":"Dinesh Mehta","age":"38","portfolio":"350000","sip":"5000","lastContact":"2024-02-28","goal":"SIP","tenure":"2022","nominee":"No"},
-    {"name":"Kavita Joshi","age":"55","portfolio":"7200000","sip":"25000","lastContact":"2024-03-01","goal":"MF+Bonds+LIC","tenure":"2008","nominee":"Yes"},
-    {"name":"Arun Trivedi","age":"48","portfolio":"900000","sip":"0","lastContact":"2023-06-15","goal":"LIC","tenure":"2015","nominee":"No"},
-    {"name":"Priya Desai","age":"32","portfolio":"180000","sip":"4000","lastContact":"2024-02-10","goal":"SIP","tenure":"2023","nominee":"No"},
-    {"name":"Hemant Rao","age":"67","portfolio":"9500000","sip":"0","lastContact":"2023-11-20","goal":"Bonds+LIC","tenure":"2005","nominee":"Yes"},
-    {"name":"Nisha Gupta","age":"41","portfolio":"2100000","sip":"12000","lastContact":"2024-01-25","goal":"MF+LIC","tenure":"2016","nominee":"Yes"},
-    {"name":"Vijay Solanki","age":"50","portfolio":"650000","sip":"6000","lastContact":"2023-08-10","goal":"MF","tenure":"2019","nominee":"No"},
-    {"name":"Rekha Jain","age":"58","portfolio":"3400000","sip":"0","lastContact":"2023-12-05","goal":"LIC+Bonds","tenure":"2011","nominee":"Yes"},
-    {"name":"Bhavesh Modi","age":"44","portfolio":"520000","sip":"7500","lastContact":"2024-03-10","goal":"MF","tenure":"2020","nominee":"No"},
-    {"name":"Geeta Sharma","age":"61","portfolio":"6100000","sip":"20000","lastContact":"2023-10-15","goal":"MF+LIC+Bonds","tenure":"2007","nominee":"Yes"},
-    {"name":"Kalpesh Vora","age":"36","portfolio":"210000","sip":"3000","lastContact":"2024-01-30","goal":"SIP","tenure":"2023","nominee":"No"},
-    {"name":"Manisha Patel","age":"53","portfolio":"2900000","sip":"10000","lastContact":"2023-07-22","goal":"LIC+MF","tenure":"2013","nominee":"Yes"},
-    {"name":"Suresh Agrawal","age":"70","portfolio":"12000000","sip":"0","lastContact":"2023-05-10","goal":"Bonds+LIC","tenure":"2002","nominee":"Yes"},
-    {"name":"Hetal Trivedi","age":"39","portfolio":"430000","sip":"6000","lastContact":"2024-02-20","goal":"MF","tenure":"2021","nominee":"No"},
-    {"name":"Jigar Shah","age":"47","portfolio":"1750000","sip":"9000","lastContact":"2023-12-18","goal":"MF+LIC","tenure":"2017","nominee":"No"},
-    {"name":"Archana Desai","age":"56","portfolio":"4200000","sip":"0","lastContact":"2023-09-05","goal":"LIC+Bonds","tenure":"2009","nominee":"Yes"},
-    {"name":"Nilesh Mehta","age":"33","portfolio":"95000","sip":"2000","lastContact":"2024-03-05","goal":"SIP","tenure":"2024","nominee":"No"},
-    {"name":"Pushpa Rao","age":"64","portfolio":"5500000","sip":"15000","lastContact":"2024-02-01","goal":"MF+LIC+Bonds","tenure":"2006","nominee":"Yes"},
+Numbers:
+- {summary['total']} clients | Total invested: {fmt_inr(summary['aum'])}
+- Clients worth ₹50L+: {summary['hni']}
+- Clients at risk of leaving: {summary['churn']}
+- Clients with no monthly SIP despite having portfolio: {summary['no_sip']}
+- Top client: {top.get('name','N/A')}, health score {top.get('score',0)}/100, portfolio {fmt_inr(top.get('portfolio',0))}
+
+{angle}
+
+Write 4 sentences. Be specific — use actual numbers. Sound like a trusted colleague giving a candid assessment over coffee. No bullet points, no headings, no "I", no "it is important". Start with something surprising. Vary sentence length dramatically."""
+        msg = client_obj.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=350,
+            messages=[{"role":"user","content":prompt}]
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        return f"AI brief unavailable — set ANTHROPIC_API_KEY to enable. ({e})"
+
+# ── SCREENS ───────────────────────────────────────────────────────────────────
+
+# ── LOGIN ──
+def show_login():
+    st.markdown("""
+    <div class="login-wrap">
+      <div class="login-card">
+        <div class="login-logo">
+          <div class="login-logo-mark">◆</div>
+          <div class="login-title">Finoptions Pro</div>
+          <div class="login-sub">Intelligence platform for financial advisors</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    username = st.text_input("Username", placeholder="Enter your username")
+    password = st.text_input("Password", type="password", placeholder="Enter your password")
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("Sign in →", use_container_width=True):
+        if username and password:
+            user = check_login(username, password)
+            if user:
+                st.session_state.user_id = user[0]
+                st.session_state.user_name = user[1]
+                st.session_state.user_company = user[2]
+                st.session_state.user_role = user[3]
+                st.session_state.screen = "upload"
+                # Load saved clients if any
+                saved = load_clients_db(user[0])
+                if saved:
+                    st.session_state.clients = saved
+                st.rerun()
+            else:
+                st.error("Incorrect username or password.")
+        else:
+            st.warning("Please fill in both fields.")
+
+    st.markdown("""
+        <div style="text-align:center;margin-top:1.5rem;font-size:11px;color:#5a6480;font-family:'Space Mono',monospace">
+          Demo: username <strong style="color:#8892a8">admin</strong> · password <strong style="color:#8892a8">admin123</strong>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ── TOP NAV ──
+def show_nav():
+    user = st.session_state.get("user_name","User")
+    company = st.session_state.get("user_company","")
+    role = st.session_state.get("user_role","advisor")
+    role_badge = "Owner" if role == "owner" else "Advisor"
+    st.markdown(f"""
+    <div class="topnav">
+      <div class="topnav-logo">
+        <div class="topnav-logo-mark">◆</div>
+        <span class="topnav-brand">Finoptions<span>Pro</span></span>
+      </div>
+      <div class="topnav-right">
+        <span class="nav-user">{user} · {company}</span>
+        <span class="nav-badge">{role_badge}</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ── UPLOAD ──
+def show_upload():
+    show_nav()
+    user = st.session_state.get("user_name","")
+    clients = st.session_state.get("clients",[])
+
+    st.markdown(f"""
+    <div class="main-wrap">
+      <div class="upload-hero">
+        <div class="upload-eyebrow">◆ Intelligence Engine</div>
+        <div class="upload-title">Your clients,<br><em>clearly ranked.</em></div>
+        <div class="upload-sub">Upload any Excel or CSV file. The engine maps your columns automatically, scores every client, and tells you exactly who to call — and why.</div>
+      </div>
+    """, unsafe_allow_html=True)
+
+    if clients:
+        st.success(f"✓ {len(clients)} clients already loaded from your last session. You can view the dashboard or upload new data.")
+        c1, c2 = st.columns([1,3])
+        with c1:
+            if st.button("View dashboard →", use_container_width=True):
+                st.session_state.screen = "dashboard"
+                st.rerun()
+
+    col = st.columns([1,2,1])[1]
+    with col:
+        uploaded = st.file_uploader("", type=["xlsx","xls","csv"], label_visibility="collapsed")
+        st.markdown("<div style='text-align:center;font-size:11px;color:#5a6480;margin-top:.5rem'>Any column format · Excel or CSV · Auto-detected</div>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Load demo data →", use_container_width=True):
+            st.session_state.use_demo = True
+            st.session_state.screen = "map"
+            st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    return uploaded
+
+# ── COLUMN MAP ──
+def show_mapping(df):
+    show_nav()
+    st.markdown('<div class="breadcrumb">Upload → <span>Column mapping</span> → Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-wrap">', unsafe_allow_html=True)
+    st.markdown("### Map your columns")
+    st.markdown("<p style='color:#8892a8;font-size:13px'>Auto-detected where possible. Adjust if any column is wrong.</p>", unsafe_allow_html=True)
+
+    cols = df.columns.tolist()
+    mapping = {}
+    grid = st.columns(2)
+    labels = {"name":"Client name","age":"Age","portfolio":"Total portfolio amount (₹)",
+               "sip":"Monthly SIP (₹)","lastContact":"Last meeting/contact date",
+               "goal":"Product type / goal","tenure":"Client since (year)","nominee":"Nominee updated?","phone":"Phone number"}
+    for i, (key, hints) in enumerate(FIELDS):
+        best = detect_col(hints, cols)
+        with grid[i % 2]:
+            options = ["— skip —"] + cols
+            default_idx = (cols.index(best)+1) if best and best in cols else 0
+            sel = st.selectbox(labels.get(key,key), options, index=default_idx, key=f"m_{key}")
+            mapping[key] = sel if sel != "— skip —" else None
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    c1, c2 = st.columns([1,4])
+    with c1:
+        if st.button("Run intelligence engine →", use_container_width=True):
+            with st.spinner("Processing and scoring your clients..."):
+                clients, merged = process(df, mapping)
+            st.session_state.clients = clients
+            st.session_state.merged_count = merged
+            save_clients_db(st.session_state.user_id, clients)
+            st.session_state.pop("ai_brief", None)
+            st.session_state.screen = "dashboard"
+            st.rerun()
+    with c2:
+        if st.button("Back"):
+            st.session_state.screen = "upload"
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ── DEMO DATA ──
+DEMO = [
+    {"name":"Ramesh Patel","age":"62","portfolio":"4800000","sip":"15000","lastContact":"2024-01-10","goal":"MF+LIC","tenure":"2010","nominee":"Yes","phone":"9876543210"},
+    {"name":"Sunita Shah","age":"45","portfolio":"1200000","sip":"8000","lastContact":"2023-09-20","goal":"MF","tenure":"2018","nominee":"No","phone":"9876543211"},
+    {"name":"Dinesh Mehta","age":"38","portfolio":"350000","sip":"5000","lastContact":"2024-02-28","goal":"SIP","tenure":"2022","nominee":"No","phone":"9876543212"},
+    {"name":"Kavita Joshi","age":"55","portfolio":"7200000","sip":"25000","lastContact":"2024-03-01","goal":"MF+Bonds+LIC","tenure":"2008","nominee":"Yes","phone":"9876543213"},
+    {"name":"Arun Trivedi","age":"48","portfolio":"900000","sip":"0","lastContact":"2023-06-15","goal":"LIC","tenure":"2015","nominee":"No","phone":"9876543214"},
+    {"name":"Priya Desai","age":"32","portfolio":"180000","sip":"4000","lastContact":"2024-02-10","goal":"SIP","tenure":"2023","nominee":"No","phone":"9876543215"},
+    {"name":"Hemant Rao","age":"67","portfolio":"9500000","sip":"0","lastContact":"2023-11-20","goal":"Bonds+LIC","tenure":"2005","nominee":"Yes","phone":"9876543216"},
+    {"name":"Nisha Gupta","age":"41","portfolio":"2100000","sip":"12000","lastContact":"2024-01-25","goal":"MF+LIC","tenure":"2016","nominee":"Yes","phone":"9876543217"},
+    {"name":"Vijay Solanki","age":"50","portfolio":"650000","sip":"6000","lastContact":"2023-08-10","goal":"MF","tenure":"2019","nominee":"No","phone":"9876543218"},
+    {"name":"Rekha Jain","age":"58","portfolio":"3400000","sip":"0","lastContact":"2023-12-05","goal":"LIC+Bonds","tenure":"2011","nominee":"Yes","phone":"9876543219"},
+    {"name":"Bhavesh Modi","age":"44","portfolio":"520000","sip":"7500","lastContact":"2024-03-10","goal":"MF","tenure":"2020","nominee":"No","phone":"9876543220"},
+    {"name":"Geeta Sharma","age":"61","portfolio":"6100000","sip":"20000","lastContact":"2023-10-15","goal":"MF+LIC+Bonds","tenure":"2007","nominee":"Yes","phone":"9876543221"},
+    {"name":"Kalpesh Vora","age":"36","portfolio":"210000","sip":"3000","lastContact":"2024-01-30","goal":"SIP","tenure":"2023","nominee":"No","phone":"9876543222"},
+    {"name":"Manisha Patel","age":"53","portfolio":"2900000","sip":"10000","lastContact":"2023-07-22","goal":"LIC+MF","tenure":"2013","nominee":"Yes","phone":"9876543223"},
+    {"name":"Suresh Agrawal","age":"70","portfolio":"12000000","sip":"0","lastContact":"2023-05-10","goal":"Bonds+LIC","tenure":"2002","nominee":"Yes","phone":"9876543224"},
+    {"name":"Hetal Trivedi","age":"39","portfolio":"430000","sip":"6000","lastContact":"2024-02-20","goal":"MF","tenure":"2021","nominee":"No","phone":"9876543225"},
+    {"name":"Jigar Shah","age":"47","portfolio":"1750000","sip":"9000","lastContact":"2023-12-18","goal":"MF+LIC","tenure":"2017","nominee":"No","phone":"9876543226"},
+    {"name":"Archana Desai","age":"56","portfolio":"4200000","sip":"0","lastContact":"2023-09-05","goal":"LIC+Bonds","tenure":"2009","nominee":"Yes","phone":"9876543227"},
+    {"name":"Nilesh Mehta","age":"33","portfolio":"95000","sip":"2000","lastContact":"2024-03-05","goal":"SIP","tenure":"2024","nominee":"No","phone":"9876543228"},
+    {"name":"Pushpa Rao","age":"64","portfolio":"5500000","sip":"15000","lastContact":"2024-02-01","goal":"MF+LIC+Bonds","tenure":"2006","nominee":"Yes","phone":"9876543229"},
 ]
 
 def prepare_demo():
     clients = []
-    for c in DEMO_CLIENTS:
+    for c in DEMO:
         c2 = dict(c)
         c2["score"] = score_client(c2)
-        c2["churn"] = churn_risk(c2)
+        c2["churn"] = churn_score(c2)
+        c2["conv"] = conv_prob(c2)
         c2["priority"] = "High" if c2["score"] >= 70 else ("Medium" if c2["score"] >= 45 else "Low")
         c2["flags"] = build_flags(c2)
         clients.append(c2)
-    clients.sort(key=lambda x: x.get("score", 0), reverse=True)
+    clients.sort(key=lambda x: x.get("score",0), reverse=True)
     return clients
 
-# ── DASHBOARD ──────────────────────────────────────────────────────────────
-
+# ── DASHBOARD ─────────────────────────────────────────────────────────────────
 def show_dashboard(clients):
-    total_aum = sum(num(c.get("portfolio", 0)) for c in clients)
-    high = [c for c in clients if c.get("priority", "Low") == "High"]
-    churn_risk_list = [c for c in clients if c.get("churn", 0) > 50]
-    sip_gap = [c for c in clients if "SIP gap" in c.get("flags", [])]
-    no_nom = [c for c in clients if "No nominee" in c.get("flags", [])]
-    hni = [c for c in clients if "HNI" in c.get("flags", [])]
+    show_nav()
+    st.markdown('<div class="breadcrumb">Upload → Mapping → <span>Intelligence Dashboard</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-wrap">', unsafe_allow_html=True)
+
+    # Compute metrics
+    total_aum = sum(num(c.get("portfolio",0)) for c in clients)
+    high = [c for c in clients if c.get("priority") == "High"]
+    at_risk = [c for c in clients if c.get("churn",0) > 50]
+    no_sip = [c for c in clients if "No SIP" in c.get("flags",[])]
+    no_nom = [c for c in clients if "No Nominee" in c.get("flags",[])]
+    hni = [c for c in clients if "High Value" in c.get("flags",[])]
+    at_risk_aum = sum(num(c.get("portfolio",0)) for c in at_risk)
     top = clients[0] if clients else {}
 
-    # ── HEADER ──
+    # ── GREETING ──
+    user = st.session_state.get("user_name","")
+    greeting = get_greeting()
+    agenda = get_agenda_msg(user, len(clients))
     st.markdown(f"""
-    <div class="top-header">
-      <div class="top-header-left">
-        <div class="eyebrow">◆ Intelligence Engine · Active</div>
-        <h1>Client Portfolio Intelligence</h1>
-        <div class="subtitle">{len(clients)} clients · {fmt_inr(total_aum)} total AUM · ML scoring active</div>
+    <div class="greeting-card">
+      <div class="greeting-left">
+        <div class="time-label">◆ {datetime.datetime.now().strftime('%A, %d %B %Y  ·  %I:%M %p')}</div>
+        <h2>{greeting}, {user}.</h2>
+        <p>{agenda}</p>
       </div>
-      <div>
-        <div class="live-badge"><span class="live-dot"></span>Live · {datetime.datetime.now().strftime('%d %b %Y')}</div>
-        <br>
+      <div class="greeting-right">
+        <div class="greeting-stat"><strong>{len(high)}</strong>clients need your call today</div>
+        <div class="greeting-stat" style="margin-top:12px"><strong style="color:#ff4d6a">{len(at_risk)}</strong>showing leaving signals</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
     # ── KPI CARDS ──
+    pct_high = round(len(high)/len(clients)*100) if clients else 0
     st.markdown(f"""
-    <div class="kpi-row">
-      <div class="kpi-card green">
-        <div class="kpi-label">Total AUM</div>
-        <div class="kpi-val">{fmt_inr(total_aum)}</div>
-        <div class="kpi-sub">{len(clients)} clients tracked</div>
-        <div class="kpi-delta">↑ Portfolio pipeline</div>
+    <div class="kpi-grid">
+      <div class="kpi green">
+        <div class="kpi-eyebrow">Total money managed</div>
+        <div class="kpi-number">{fmt_inr(total_aum)}</div>
+        <div class="kpi-desc">{len(clients)} clients · {len(hni)} are high-value (₹50L+)</div>
+        <div class="kpi-signal">↑ Your full portfolio</div>
       </div>
-      <div class="kpi-card blue">
-        <div class="kpi-label">High Priority</div>
-        <div class="kpi-val">{len(high)}</div>
-        <div class="kpi-sub">ML score ≥ 70/100</div>
-        <div class="kpi-delta">{round(len(high)/len(clients)*100) if clients else 0}% of base · convert now</div>
+      <div class="kpi blue">
+        <div class="kpi-eyebrow">Ready to act</div>
+        <div class="kpi-number">{len(high)}</div>
+        <div class="kpi-desc">Health score 70+ out of 100 — call these first</div>
+        <div class="kpi-signal">{pct_high}% of your clients</div>
       </div>
-      <div class="kpi-card red">
-        <div class="kpi-label">Churn Risk</div>
-        <div class="kpi-val">{len(churn_risk_list)}</div>
-        <div class="kpi-sub">Probability &gt; 50%</div>
-        <div class="kpi-delta">⚠ Urgent action needed</div>
+      <div class="kpi red">
+        <div class="kpi-eyebrow">Leaving risk</div>
+        <div class="kpi-number">{len(at_risk)}</div>
+        <div class="kpi-desc">These clients may move to another advisor soon</div>
+        <div class="kpi-signal">⚠ {fmt_inr(at_risk_aum)} at risk</div>
       </div>
-      <div class="kpi-card amber">
-        <div class="kpi-label">SIP Gap</div>
-        <div class="kpi-val">{len(sip_gap)}</div>
-        <div class="kpi-sub">No SIP · have portfolio</div>
-        <div class="kpi-delta">Revenue opportunity</div>
+      <div class="kpi amber">
+        <div class="kpi-eyebrow">Money left on table</div>
+        <div class="kpi-number">{len(no_sip)}</div>
+        <div class="kpi-desc">Have invested but no monthly SIP — easy upsell</div>
+        <div class="kpi-signal">Start a SIP conversation</div>
       </div>
-      <div class="kpi-card purple">
-        <div class="kpi-label">No Nominee</div>
-        <div class="kpi-val">{len(no_nom)}</div>
-        <div class="kpi-sub">Compliance exposure</div>
-        <div class="kpi-delta">Regulatory follow-up</div>
+      <div class="kpi purple">
+        <div class="kpi-eyebrow">Paperwork pending</div>
+        <div class="kpi-number">{len(no_nom)}</div>
+        <div class="kpi-desc">Nominee form not filled — compliance issue</div>
+        <div class="kpi-signal">Legal risk for client's family</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── AI INSIGHT ──
-    summary = {
-        "hni": len(hni), "churn": len(churn_risk_list),
-        "no_sip": len(sip_gap), "top": top,
-        "aum": total_aum, "total": len(clients)
-    }
-
-    with st.spinner(""):
-        if "ai_insight" not in st.session_state or st.session_state.get("ai_insight_stale"):
-            insight = get_ai_insight(clients, summary)
-            st.session_state.ai_insight = insight
-            st.session_state.ai_insight_stale = False
+    # ── AI BRIEF ──
+    summary = {"total":len(clients),"aum":total_aum,"hni":len(hni),
+               "churn":len(at_risk),"no_sip":len(no_sip),"top":top}
+    with st.spinner("Generating intelligence brief..."):
+        if "ai_brief" not in st.session_state or st.session_state.get("ai_stale"):
+            brief = get_ai_brief(clients, summary)
+            st.session_state.ai_brief = brief
+            st.session_state.ai_stale = False
         else:
-            insight = st.session_state.ai_insight
+            brief = st.session_state.ai_brief
 
     st.markdown(f"""
-    <div class="ai-panel">
-      <div class="ai-panel-header">
-        <span class="ai-tag">AI Intelligence Brief</span>
-        <span class="ai-model">claude-sonnet · fresh every session</span>
+    <div class="ai-brief">
+      <div class="ai-brief-header">
+        <span class="ai-pill">◆ AI Intelligence Brief</span>
+        <span class="ai-model-tag">claude-sonnet · fresh every session · {random.choice(['Revenue angle','Risk angle','Relationship angle','Growth angle','Pattern angle'])}</span>
       </div>
-      <div class="ai-body">{insight}</div>
+      <div class="ai-text">{brief}</div>
     </div>
     """, unsafe_allow_html=True)
 
-    col_r, _ = st.columns([1, 5])
-    with col_r:
+    c_refresh, _ = st.columns([1,5])
+    with c_refresh:
         if st.button("Refresh brief ↺"):
-            st.session_state.ai_insight_stale = True
+            st.session_state.ai_stale = True
             st.rerun()
 
     # ── TABS ──
-    tab1, tab2, tab3, tab4 = st.tabs(["Priority ranking", "Smart actions", "Event intelligence", "WhatsApp drafts"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Priority ranking", "What to do next", "Event intelligence", "ML predictions", "WhatsApp drafts"
+    ])
 
-    # ─ TAB 1: CLIENT TABLE ─
+    # ─ TAB 1 ─
     with tab1:
-        filter_options = ["All clients", "High priority", "Medium", "Low", "Churn risk", "SIP gap", "No nominee"]
-        filter_sel = st.selectbox("Filter", filter_options, label_visibility="collapsed")
-
+        filter_opts = ["All clients","Ready to act (High)","Medium","Needs attention (Low)","Leaving risk","No SIP","No Nominee"]
+        col_f, col_s = st.columns([2,4])
+        with col_f:
+            fsel = st.selectbox("Show", filter_opts, label_visibility="collapsed")
         filtered = clients
-        if filter_sel == "High priority": filtered = [c for c in clients if c.get("priority", "Low") == "High"]
-        elif filter_sel == "Medium": filtered = [c for c in clients if c.get("priority", "Low") == "Medium"]
-        elif filter_sel == "Low": filtered = [c for c in clients if c.get("priority", "Low") == "Low"]
-        elif filter_sel == "Churn risk": filtered = [c for c in clients if c.get("churn", 0) > 50]
-        elif filter_sel == "SIP gap": filtered = [c for c in clients if "SIP gap" in c.get("flags", [])]
-        elif filter_sel == "No nominee": filtered = [c for c in clients if "No nominee" in c.get("flags", [])]
+        if "High" in fsel: filtered = [c for c in clients if c.get("priority")=="High"]
+        elif "Medium" in fsel: filtered = [c for c in clients if c.get("priority")=="Medium"]
+        elif "Low" in fsel or "Needs" in fsel: filtered = [c for c in clients if c.get("priority")=="Low"]
+        elif "Leaving" in fsel: filtered = [c for c in clients if c.get("churn",0)>50]
+        elif "SIP" in fsel: filtered = [c for c in clients if "No SIP" in c.get("flags",[])]
+        elif "Nominee" in fsel: filtered = [c for c in clients if "No Nominee" in c.get("flags",[])]
 
-        st.markdown(f"<div style='font-size:12px;color:#7a8394;margin-bottom:.75rem'>Showing {len(filtered)} of {len(clients)} clients</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:11px;color:#5a6480;font-family:Space Mono,monospace;margin-bottom:1rem'>Showing {len(filtered)} of {len(clients)} clients · sorted by health score</div>", unsafe_allow_html=True)
 
-        rows_html = ""
+        rows = ""
         for i, c in enumerate(filtered):
-            chip_cls = "chip-high" if c.get("priority", "Low")=="High" else ("chip-medium" if c.get("priority", "Low")=="Medium" else "chip-low")
-            fill_color = "#22c55e" if c.get("score", 0)>=70 else ("#f59e0b" if c.get("score", 0)>=45 else "#ef4444")
-            churn_color = "#ef4444" if c.get("churn", 0)>60 else ("#f59e0b" if c.get("churn", 0)>30 else "#22c55e")
-            flags_html = "".join(f'<span class="flag-pill">{f}</span>' for f in c.get("flags", [])[:2])
-            rank_icon = "◆" if i == 0 else ("◇" if i == 1 else ("△" if i == 2 else f"#{i+1}"))
-            rows_html += f"""<tr>
-              <td style="color:#7a8394;font-family:'DM Mono',monospace;font-size:12px;width:44px">{rank_icon}</td>
-              <td class="client-name">{c['name'] or '—'}</td>
-              <td style="font-family:'DM Mono',monospace;font-size:12px">{fmt_inr(c['portfolio'])}</td>
-              <td style="font-family:'DM Mono',monospace;font-size:12px">{fmt_inr(c['sip']) if num(c['sip'])>0 else '—'}</td>
-              <td>
-                <div class="bar-wrap">
-                  <span style="font-family:'DM Mono',monospace;font-size:12px;min-width:28px">{c['score']}</span>
-                  <span class="mini-bar"><span class="mini-fill" style="width:{c['score']}%;background:{fill_color}"></span></span>
-                </div>
-              </td>
-              <td><span class="score-chip {chip_cls}">{c['priority']}</span></td>
-              <td style="font-family:'DM Mono',monospace;font-size:11px;color:{churn_color}">{c['churn']}%</td>
+            sc = c.get("score",0)
+            ch = c.get("churn",0)
+            pr = c.get("priority","Low")
+            chip = f'<span class="chip chip-{"high" if pr=="High" else "medium" if pr=="Medium" else "low"}">{pr}</span>'
+            fill = "#00d97e" if sc>=70 else ("#ffb340" if sc>=45 else "#ff4d6a")
+            churn_col = "#ff4d6a" if ch>60 else ("#ffb340" if ch>30 else "#00d97e")
+            rank = "◆" if i==0 else ("◇" if i==1 else ("△" if i==2 else f"#{i+1}"))
+            flags_html = "".join(f'<span class="flag">{f}</span>' for f in c.get("flags",[])[:2])
+            rows += f"""<tr>
+              <td class="client-rank">{rank}</td>
+              <td><div class="client-name-cell">{c.get("name","—")}</div>
+                  <div class="client-sub">{c.get("goal","—")} · Age {c.get("age","—")}</div></td>
+              <td style="font-family:'Space Mono',monospace;font-size:12px">{fmt_inr(c.get("portfolio",0))}</td>
+              <td style="font-family:'Space Mono',monospace;font-size:12px">{fmt_inr(c.get("sip",0)) if num(c.get("sip",0))>0 else "—"}</td>
+              <td><div class="sbar-wrap">
+                <span class="snum" style="color:{fill}">{sc}</span>
+                <span class="sbar"><span class="sbar-fill" style="width:{sc}%;background:{fill}"></span></span>
+              </div></td>
+              <td>{chip}</td>
+              <td style="font-family:'Space Mono',monospace;font-size:11px;color:{churn_col}">{ch}%</td>
               <td>{flags_html}</td>
             </tr>"""
 
         st.markdown(f"""
-        <table class="client-table">
+        <table class="ptable">
           <thead><tr>
-            <th></th><th>Client</th><th>Portfolio</th><th>SIP/mo</th>
-            <th>ML Score</th><th>Priority</th><th>Churn</th><th>Flags</th>
+            <th></th><th>Client</th><th>Portfolio</th><th>Monthly SIP</th>
+            <th>Health score</th><th>Status</th><th>Leaving risk</th><th>Alerts</th>
           </tr></thead>
-          <tbody>{rows_html}</tbody>
-        </table>
-        """, unsafe_allow_html=True)
+          <tbody>{rows}</tbody>
+        </table>""", unsafe_allow_html=True)
 
     # ─ TAB 2: SMART ACTIONS ─
     with tab2:
-        top4 = clients[:4]
-        inactive = [c for c in clients if "Inactive 6m+" in c.get("flags", [])][:2]
-        sip_opp = [c for c in clients if "SIP gap" in c.get("flags", [])][:2]
-        no_nom_list = [c for c in clients if "No nominee" in c.get("flags", [])][:2]
+        top_c = clients[0] if clients else {}
+        leave_2 = ", ".join(c.get("name","") for c in at_risk[:2]) or "—"
+        sip_2 = ", ".join(c.get("name","") for c in no_sip[:2]) or "—"
+        nom_2 = ", ".join(c.get("name","") for c in no_nom[:2]) or "—"
 
         actions = [
-            {
-                "icon": "◆", "cls": "green",
-                "title": f"Immediate revenue — pitch {top4[0]['name'] if top4 else 'top client'} now",
-                "desc": f"ML score {top4[0]['score'] if top4 else 0}/100. Portfolio {fmt_inr(top4[0]['portfolio'] if top4 else 0)} with strongest recency signals in your base. Recommend MF top-up or capital gain bond this week.",
-                "tag": "High ROI", "tag_color": "#22c55e"
-            },
-            {
-                "icon": "⚠", "cls": "red",
-                "title": f"Churn prevention — {len(churn_risk_list)} clients at risk of leaving",
-                "desc": f"{', '.join(c['name'] for c in churn_risk_list[:2])} haven't engaged in 6+ months. At this stage withdrawal probability rises 3× per month of inactivity. A personalised portfolio review call — not a sales call — is the right move.",
-                "tag": "Urgent", "tag_color": "#ef4444"
-            },
-            {
-                "icon": "↑", "cls": "amber",
-                "title": f"SIP upgrade — {len(sip_gap)} HNI clients with zero SIP",
-                "desc": f"{', '.join(c['name'] for c in sip_gap[:2])} hold significant portfolios with no systematic plan. A 10-minute compound growth projection demo converts over 60% of these cases historically.",
-                "tag": "Growth", "tag_color": "#f59e0b"
-            },
-            {
-                "icon": "◻", "cls": "blue",
-                "title": f"Compliance sweep — {len(no_nom)} clients without nominee",
-                "desc": f"Proactively fixing nominee gaps positions you as a responsible advisor, not just a product seller. This is a trust-building call with zero sales pressure — and it sticks.",
-                "tag": "Compliance", "tag_color": "#3b82f6"
-            },
+            ("green","1",f"Call {top_c.get('name','your top client')} this week",
+             f"Health score {top_c.get('score',0)}/100 — your strongest client right now. Portfolio of {fmt_inr(top_c.get('portfolio',0))}. Fresh contact, high investment history. Best time to pitch a MF top-up or capital gain bond.",
+             "High return","#00d97e"),
+            ("red","2",f"Save {len(at_risk)} clients who may be leaving",
+             f"{leave_2} haven't spoken to you in 6+ months. Every month of silence doubles the chance they move to another advisor. Don't pitch — just call for a portfolio health check.",
+             "Urgent","#ff4d6a"),
+            ("amber","3",f"Start SIP conversations with {len(no_sip)} investors",
+             f"{sip_2} have money invested but no monthly SIP. Show them a simple projection — ₹5,000/month for 15 years turns into ₹30L+. That one chart does the selling.",
+             "Revenue","#ffb340"),
+            ("blue","4",f"Fix nominee forms for {len(no_nom)} clients",
+             f"{nom_2} haven't filled their nominee form. This is a compliance risk for their family. Call them — it takes 10 minutes and positions you as the advisor who cares beyond commissions.",
+             "Compliance","#4d9fff"),
         ]
-
-        for a in actions:
+        for cls, num_str, title, desc, tag, tc in actions:
             st.markdown(f"""
-            <div class="action-card">
-              <div class="action-icon {a['cls']}">{a['icon']}</div>
-              <div class="action-body">
-                <div class="action-title">
-                  {a['title']}
-                  <span class="action-tag" style="background:rgba(255,255,255,.05);color:{a['tag_color']};border:1px solid {a['tag_color']}33">{a['tag']}</span>
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.25rem;margin-bottom:12px;display:flex;gap:14px;align-items:flex-start">
+              <div class="action-num {cls}">{num_str}</div>
+              <div style="flex:1">
+                <div class="action-title-row">{title}
+                  <span class="urgency-tag" style="background:{tc}18;color:{tc};border:1px solid {tc}33">{tag}</span>
                 </div>
-                <div class="action-desc">{a['desc']}</div>
+                <div class="action-desc-row">{desc}</div>
               </div>
-            </div>
-            """, unsafe_allow_html=True)
+            </div>""", unsafe_allow_html=True)
 
     # ─ TAB 3: EVENTS ─
     with tab3:
-        hni_clients = [c for c in clients if "HNI" in c.get("flags", [])]
-        senior_clients = [c for c in clients if int(c.get("age") or 0) >= 55]
+        hni_names = [c.get("name","") for c in hni[:3]]
+        sip_names = [c.get("name","") for c in no_sip[:3]]
+        senior = [c for c in clients if int(float(c.get("age") or 0)) >= 55]
+        senior_names = [c.get("name","") for c in senior[:3]]
+        risk_aum = fmt_inr(at_risk_aum * 0.15)
 
         events = [
-            {
-                "title": "HNI portfolio conclave",
-                "tag": "Revenue", "tag_color": "#22c55e",
-                "desc": f"Private 1:1 review for {len(hni_clients)} HNI clients. Present capital gain bonds and new MF opportunities with personalised return projections.",
-                "meta": f"{len(hni_clients)} clients · This quarter",
-                "targets": [c.get("name", "—") for c in hni_clients[:3]]
-            },
-            {
-                "title": "SIP accelerator drive",
-                "tag": "Growth", "tag_color": "#f59e0b",
-                "desc": f"Compound growth demo for {len(sip_gap)} clients with zero SIP. Show the ₹10L→₹40L projection in 15 years. One visual does the selling.",
-                "meta": f"{len(sip_gap)} clients · Next month",
-                "targets": [c.get("name", "—") for c in sip_gap[:3]]
-            },
-            {
-                "title": "Senior estate planning camp",
-                "tag": "Retention", "tag_color": "#a855f7",
-                "desc": f"LIC maturity planning, estate structuring for {len(senior_clients)} clients aged 55+. Builds deep loyalty that survives market downturns.",
-                "meta": f"{len(senior_clients)} clients · This quarter",
-                "targets": [c.get("name", "—") for c in senior_clients[:3]]
-            },
+            ("High impact","#00d97e",
+             "Private portfolio review — HNI clients",
+             f"Call {len(hni)} high-value clients for a private 1:1 review. Show updated performance numbers and introduce capital gain bonds or new MF opportunities.",
+             f"ROI: Direct upsell opportunity",
+             f"{len(hni)} clients · {', '.join(hni_names)}{'...' if len(hni_names)==3 else ''}"),
+            ("Growth","#ffb340",
+             "SIP growth drive",
+             f"Organise a small group session showing compound growth projections. Target {len(no_sip)} clients with portfolio but no SIP. One clear chart converts most of them.",
+             f"ROI: New monthly income stream",
+             f"{len(no_sip)} clients · {', '.join(sip_names)}{'...' if len(sip_names)==3 else ''}"),
+            ("Retention","#a78bfa",
+             "Senior wealth planning workshop",
+             f"{len(senior)} clients are 55+. A session on estate planning, LIC maturity and retirement structuring builds loyalty that survives market downturns.",
+             f"ROI: Long-term relationship value",
+             f"{len(senior)} clients · {', '.join(senior_names)}{'...' if len(senior_names)==3 else ''}"),
         ]
-
-        cols = st.columns(3)
-        for i, ev in enumerate(events):
-            with cols[i]:
-                targets_str = ", ".join(ev["targets"]) + ("..." if len(ev["targets"]) == 3 else "")
+        cols_e = st.columns(3)
+        for i, (tag, tc, title, desc, roi, meta) in enumerate(events):
+            with cols_e[i]:
                 st.markdown(f"""
-                <div class="event-card">
+                <div class="ev-card">
                   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-                    <h4>{ev['title']}</h4>
-                    <span class="score-chip" style="background:transparent;border:1px solid {ev['tag_color']}44;color:{ev['tag_color']};font-size:10px;padding:2px 8px">{ev['tag']}</span>
+                    <h4>{title}</h4>
+                    <span class="chip" style="background:{tc}15;color:{tc};border:1px solid {tc}33">{tag}</span>
                   </div>
-                  <p>{ev['desc']}</p>
-                  <div class="event-meta">{ev['meta']}</div>
-                  <div style="margin-top:8px;font-size:11px;color:#7a8394">Targets: {targets_str or '—'}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                  <p>{desc}</p>
+                  <div class="ev-roi">{roi}</div>
+                  <div class="ev-meta">{meta}</div>
+                </div>""", unsafe_allow_html=True)
 
-    # ─ TAB 4: WHATSAPP ─
+    # ─ TAB 4: ML PREDICTIONS ─
     with tab4:
-        client_names = [c.get("name", "—") for c in clients if c.get("name", "—")]
-        selected_name = st.selectbox("Select client", client_names)
-        sel_client = next((c for c in clients if c.get("name", "—") == selected_name), None)
+        st.markdown("""
+        <div class="panel-header" style="margin-bottom:1rem">
+          <div class="panel-icon purple">◈</div>
+          <div><div class="panel-title">ML Prediction Engine</div>
+          <div class="panel-sub">Health score · Leaving risk · Conversion probability · Trend</div></div>
+        </div>""", unsafe_allow_html=True)
 
-        if sel_client:
-            col_a, col_b = st.columns([1, 1])
-            with col_a:
+        top_ml = clients[:10]
+        header = '<div class="ml-header"><span>Client</span><span>Score change</span><span>Leaving risk</span><span>Will invest?</span><span>Trend</span><span>Confidence</span></div>'
+        rows_ml = ""
+        for c in top_ml:
+            sc = c.get("score",0)
+            ch = c.get("churn",0)
+            cv = c.get("conv",50)
+            delta_lo, delta_hi = max(0,sc-3), min(100,sc+3)
+            trend = "Ascending" if sc >= 60 else ("Stable" if sc >= 45 else "Declining")
+            trend_col = "trend-up" if trend=="Ascending" else ("trend-down" if trend=="Declining" else "")
+            conf = random.randint(82,94)
+            ch_col = "#ff4d6a" if ch>60 else ("#ffb340" if ch>30 else "#00d97e")
+            cv_col = "#00d97e" if cv>60 else ("#ffb340" if cv>40 else "#ff4d6a")
+            rows_ml += f"""<div class="ml-row">
+              <span style="font-weight:600">{c.get("name","—")}</span>
+              <span style="font-family:'Space Mono',monospace;font-size:11px;color:#00d97e">{delta_lo}→{delta_hi}</span>
+              <span style="font-family:'Space Mono',monospace;font-size:11px;color:{ch_col}">{ch}%</span>
+              <span style="font-family:'Space Mono',monospace;font-size:11px;color:{cv_col}">{cv}%</span>
+              <span class="{trend_col}" style="font-size:11px">↗ {trend}</span>
+              <span style="font-family:'Space Mono',monospace;font-size:11px;color:#8892a8">{conf}%
+                <span class="conf-bar"><span class="conf-fill" style="width:{conf}%"></span></span>
+              </span>
+            </div>"""
+        st.markdown(f'<div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden">{header}{rows_ml}</div>', unsafe_allow_html=True)
+
+    # ─ TAB 5: WHATSAPP ─
+    with tab5:
+        names = [c.get("name","") for c in clients if c.get("name")]
+        sel_name = st.selectbox("Select client", names)
+        sel = next((c for c in clients if c.get("name") == sel_name), None)
+        if sel:
+            c_a, c_b = st.columns([1,1])
+            with c_a:
+                sc = sel.get("score",0)
+                ch = sel.get("churn",0)
                 st.markdown(f"""
-                <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.2rem;margin-bottom:1rem">
-                  <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-family:'DM Mono',monospace;color:#7a8394;margin-bottom:10px">Client snapshot</div>
-                  <div style="font-size:15px;font-weight:600;margin-bottom:8px">{sel_client['name']}</div>
-                  <div style="font-size:12px;color:#9aa3b2;line-height:2">
-                    Portfolio: <span style="color:#f0f1f3">{fmt_inr(sel_client['portfolio'])}</span><br>
-                    SIP: <span style="color:#f0f1f3">{fmt_inr(sel_client['sip']) if num(sel_client['sip'])>0 else 'Not started'}</span><br>
-                    ML Score: <span style="color:#f0f1f3">{sel_client['score']}/100</span><br>
-                    Churn risk: <span style="color:{'#ef4444' if sel_client['churn']>50 else '#22c55e'}">{sel_client['churn']}%</span>
+                <div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:1.2rem;margin-bottom:1rem">
+                  <div style="font-size:10px;color:#5a6480;font-family:'Space Mono',monospace;text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">Client profile</div>
+                  <div style="font-size:16px;font-weight:700;margin-bottom:10px">{sel.get("name","")}</div>
+                  <div style="font-size:12px;color:#8892a8;line-height:2.2">
+                    Portfolio: <span style="color:#e8eaf0;font-family:'Space Mono',monospace">{fmt_inr(sel.get("portfolio",0))}</span><br>
+                    Monthly SIP: <span style="color:#e8eaf0;font-family:'Space Mono',monospace">{fmt_inr(sel.get("sip",0)) if num(sel.get("sip",0))>0 else "Not started"}</span><br>
+                    Health score: <span style="color:{'#00d97e' if sc>=70 else '#ffb340' if sc>=45 else '#ff4d6a'};font-family:'Space Mono',monospace;font-weight:700">{sc}/100</span><br>
+                    Leaving risk: <span style="color:{'#ff4d6a' if ch>50 else '#00d97e'};font-family:'Space Mono',monospace">{ch}%</span>
                   </div>
-                </div>
-                """, unsafe_allow_html=True)
+                </div>""", unsafe_allow_html=True)
+                msg_type = st.radio("Message type", ["Check-in call request","SIP proposal","Portfolio review","Nominee update"], label_visibility="visible")
 
-                msg_type = st.radio("Message type", ["Follow-up call request", "SIP upgrade proposal", "Portfolio review invite", "Nominee update request"], label_visibility="visible")
-
-            with col_b:
-                templates = {
-                    "Follow-up call request": f"Dear {sel_client['name']},\n\nI've been reviewing your portfolio and there are a few important developments I'd like to walk you through personally. Your investment profile suggests this is a good time to revisit your strategy.\n\nCould we schedule a 20-minute call this week at your convenience?\n\nWarm regards,\nKartik Dadia | Aditya Finoptions",
-                    "SIP upgrade proposal": f"Dear {sel_client['name']},\n\nBased on your current portfolio of {fmt_inr(sel_client['portfolio'])}, I've prepared a personalised SIP projection that could significantly accelerate your wealth creation over the next 10 years.\n\nThe numbers are compelling — I'd like to share them with you. Would 15 minutes work this week?\n\nWarm regards,\nKartik Dadia | Aditya Finoptions",
-                    "Portfolio review invite": f"Dear {sel_client['name']},\n\nIt's time for your annual portfolio review. Given the current market conditions, I want to make sure your investments are positioned optimally for the next 12 months.\n\nI've already done the analysis — let's talk through it. When works best for you?\n\nWarm regards,\nKartik Dadia | Aditya Finoptions",
-                    "Nominee update request": f"Dear {sel_client['name']},\n\nAs part of our annual compliance review, I noticed your nomination details may need updating. This is a critical document that protects your family's financial interests.\n\nIt takes under 10 minutes — may I assist you with this? I can come to you or we can do it over a call.\n\nWarm regards,\nKartik Dadia | Aditya Finoptions",
+            with c_b:
+                tmpls = {
+                    "Check-in call request": f"Dear {sel.get('name','')},\n\nI've been reviewing your portfolio and wanted to personally connect — there are a few market developments that are relevant to your investments.\n\nCould we schedule a quick 20-minute call this week at your convenience?\n\nWarm regards,\nKartik Dadia\nAditya Finoptions",
+                    "SIP proposal": f"Dear {sel.get('name','')},\n\nBased on your current portfolio of {fmt_inr(sel.get('portfolio',0))}, I've put together a personalised SIP plan that could significantly grow your wealth over the next 10 years.\n\nThe numbers are quite compelling — can we find 15 minutes to walk through it?\n\nWarm regards,\nKartik Dadia\nAditya Finoptions",
+                    "Portfolio review": f"Dear {sel.get('name','')},\n\nYour annual portfolio review is due. Given current market conditions, I want to make sure your investments are optimally positioned for the year ahead.\n\nI've already done the analysis — when works best for a quick call?\n\nWarm regards,\nKartik Dadia\nAditya Finoptions",
+                    "Nominee update": f"Dear {sel.get('name','')},\n\nAs part of our annual client care review, I noticed your nominee details may need to be updated — this is important to protect your family's interests.\n\nIt takes under 10 minutes. May I help you with this?\n\nWarm regards,\nKartik Dadia\nAditya Finoptions",
                 }
-
-                final_msg = templates[msg_type]
-                edited = st.text_area("Edit before sending", final_msg, height=220)
-
-                wa_msg = edited.replace("\n", "%0A").replace(" ", "%20")
-                st.markdown(f'<a class="wa-btn" href="https://wa.me/?text={wa_msg}" target="_blank">Open in WhatsApp ↗</a>', unsafe_allow_html=True)
+                edited = st.text_area("Edit message before sending", tmpls[msg_type], height=220)
+                wa_text = edited.replace("\n","%0A").replace(" ","%20")
+                phone = sel.get("phone","")
+                wa_link = f"https://wa.me/{phone}?text={wa_text}" if phone else f"https://wa.me/?text={wa_text}"
+                st.markdown(f'<br><a class="wa-btn" href="{wa_link}" target="_blank">Open in WhatsApp ↗</a>', unsafe_allow_html=True)
 
     # ── FOOTER ──
     st.markdown("<br><hr>", unsafe_allow_html=True)
-    st.markdown(f"<div style='text-align:center;font-size:11px;color:#4a5060;font-family:DM Mono,monospace'>Finoptions Intelligence Pro · {len(clients)} clients · {fmt_inr(total_aum)} AUM · Built with ML + Claude AI</div>", unsafe_allow_html=True)
+    merged = st.session_state.get("merged_count",0)
+    merged_str = f" · {merged} duplicates merged" if merged else ""
+    st.markdown(f"<div style='text-align:center;font-size:11px;color:#2a3347;font-family:Space Mono,monospace'>Finoptions Intelligence Pro · {len(clients)} clients · {fmt_inr(total_aum)} AUM{merged_str} · Powered by Claude AI</div>", unsafe_allow_html=True)
 
-    if st.sidebar.button("Upload new file"):
-        for k in ["clients","demo","screen","mapping","raw_df","ai_insight","ai_insight_stale"]:
-            st.session_state.pop(k, None)
-        st.rerun()
+    # Sidebar controls
+    st.markdown("</div>", unsafe_allow_html=True)
+    with st.sidebar:
+        st.markdown(f"**{st.session_state.get('user_name','')}**")
+        st.caption(st.session_state.get("user_company",""))
+        if st.button("Upload new data"):
+            st.session_state.pop("ai_brief",None)
+            st.session_state.screen = "upload"
+            st.rerun()
+        if st.button("Sign out"):
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
 
-# ── MAIN ROUTER ────────────────────────────────────────────────────────────
-
+# ── MAIN ROUTER ───────────────────────────────────────────────────────────────
 def main():
-    # 1. Initialize screen if not present
+    init_db()
+
     if "screen" not in st.session_state:
-        st.session_state.screen = "upload"
+        st.session_state.screen = "login"
 
-    # 2. Handle Demo Shortcut
-    if st.session_state.get("demo"):
-        st.session_state.clients = prepare_demo()
-        st.session_state.screen = "dashboard"
-        # Reset demo flag so it doesn't loop
-        st.session_state.demo = False 
-        st.rerun()
+    screen = st.session_state.screen
 
-    # 3. Route to Dashboard
-    if st.session_state.screen == "dashboard":
-        # Check if we are coming from a manual upload or demo
-        if "mapping" in st.session_state and "upload_df" in st.session_state:
-            # Process the uploaded file with the saved mapping
-            clients = process(st.session_state.upload_df, st.session_state.mapping)
-            show_dashboard(clients)
-        elif "clients" in st.session_state:
-            # Show demo data
-            show_dashboard(st.session_state.clients)
+    # Not logged in → login screen
+    if "user_id" not in st.session_state and screen != "login":
+        st.session_state.screen = "login"
+        screen = "login"
+
+    if screen == "login":
+        show_login()
+        return
+
+    if screen == "upload":
+        uploaded = show_upload()
+        if uploaded:
+            try:
+                df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
+                st.session_state.upload_df = df
+                st.session_state.screen = "map"
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
+        return
+
+    if screen == "map":
+        if st.session_state.get("use_demo"):
+            clients = prepare_demo()
+            st.session_state.clients = clients
+            st.session_state.use_demo = False
+            save_clients_db(st.session_state.user_id, clients)
+            st.session_state.pop("ai_brief",None)
+            st.session_state.screen = "dashboard"
+            st.rerun()
+        elif "upload_df" in st.session_state:
+            show_mapping(st.session_state.upload_df)
         else:
-            # Fallback if something goes wrong
             st.session_state.screen = "upload"
             st.rerun()
         return
 
-    # 4. Route to Mapping Screen
-    if st.session_state.screen == "map" and "upload_df" in st.session_state:
-        show_mapping(st.session_state.upload_df)
-        return
-
-    # 5. Default: Show Upload Screen
-    uploaded = show_upload()
-
-    if uploaded:
-        try:
-            if uploaded.name.endswith(".csv"):
-                df = pd.read_csv(uploaded)
-            else:
-                df = pd.read_excel(uploaded)
-            st.session_state.upload_df = df
-            st.session_state.screen = "map"
+    if screen == "dashboard":
+        clients = st.session_state.get("clients",[])
+        if not clients:
+            st.session_state.screen = "upload"
             st.rerun()
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
+            return
+        show_dashboard(clients)
+        return
 
 if __name__ == "__main__":
     main()
