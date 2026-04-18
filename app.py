@@ -3,21 +3,53 @@ import pandas as pd
 import numpy as np
 
 st.set_page_config(page_title="Advisor AI System", layout="wide")
-
 st.title("📊 Advisor AI Growth System")
 
 # -----------------------------
-# SESSION STATE INIT
+# SESSION STATE
 # -----------------------------
 if "data" not in st.session_state:
     st.session_state.data = None
+
+# -----------------------------
+# AUTO COLUMN DETECTION
+# -----------------------------
+def detect_column(possible_names, columns):
+    for col in columns:
+        col_clean = col.lower().replace(" ", "").replace("_", "")
+        for name in possible_names:
+            if name in col_clean:
+                return col
+    return None
+
+# -----------------------------
+# DATA CLEANING FUNCTIONS
+# -----------------------------
+def clean_phone(phone):
+    phone = str(phone)
+    phone = ''.join(filter(str.isdigit, phone))
+    if len(phone) == 10:
+        return "91" + phone
+    return phone
+
+def clean_investment(val):
+    try:
+        return float(str(val).replace(",", "").replace("₹", ""))
+    except:
+        return 0
+
+def clean_days(val):
+    try:
+        return int(val)
+    except:
+        return 30
 
 # -----------------------------
 # FILE UPLOAD
 # -----------------------------
 st.sidebar.header("📂 Upload Client Data")
 
-uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "csv"])
+uploaded_file = st.sidebar.file_uploader("Upload Excel/CSV", type=["xlsx", "csv"])
 
 if uploaded_file:
     if uploaded_file.name.endswith(".csv"):
@@ -28,45 +60,75 @@ if uploaded_file:
     st.subheader("🔍 Raw Data Preview")
     st.dataframe(df.head())
 
-    # -----------------------------
-    # COLUMN MAPPING
-    # -----------------------------
-    st.subheader("⚙️ Map Your Columns")
-
     columns = df.columns.tolist()
 
-    name_col = st.selectbox("Client Name Column", columns)
-    phone_col = st.selectbox("Phone Column", columns)
-    investment_col = st.selectbox("Investment Amount Column", columns)
-    last_contact_col = st.selectbox("Last Contact Days Column", columns)
+    # -----------------------------
+    # AUTO DETECT
+    # -----------------------------
+    name_col = detect_column(["name", "client"], columns)
+    phone_col = detect_column(["phone", "mobile", "contact"], columns)
+    investment_col = detect_column(["investment", "amount", "value"], columns)
+    last_contact_col = detect_column(["last", "days", "contact"], columns)
 
-    if st.button("✅ Confirm Mapping"):
+    st.info("✅ Columns auto-detected. You can change if needed.")
+
+    name_col = st.selectbox("Client Name", columns, index=columns.index(name_col) if name_col in columns else 0)
+    phone_col = st.selectbox("Phone", columns, index=columns.index(phone_col) if phone_col in columns else 0)
+    investment_col = st.selectbox("Investment", columns, index=columns.index(investment_col) if investment_col in columns else 0)
+    last_contact_col = st.selectbox("Last Contact Days", columns, index=columns.index(last_contact_col) if last_contact_col in columns else 0)
+
+    if st.button("🚀 Process Data"):
+
+        # -----------------------------
+        # CLEAN DATA
+        # -----------------------------
         mapped_df = pd.DataFrame({
-            "name": df[name_col],
-            "phone": df[phone_col],
-            "investment": pd.to_numeric(df[investment_col], errors="coerce").fillna(0),
-            "last_contact_days": pd.to_numeric(df[last_contact_col], errors="coerce").fillna(30)
+            "name": df[name_col].astype(str).str.strip(),
+            "phone": df[phone_col].apply(clean_phone),
+            "investment": df[investment_col].apply(clean_investment),
+            "last_contact_days": df[last_contact_col].apply(clean_days)
         })
 
+        # Handle missing
+        mapped_df["name"].replace("", "Unknown", inplace=True)
+        mapped_df["phone"].replace("", "0000000000", inplace=True)
+
         # -----------------------------
-        # SCORING ENGINE (RULE-BASED)
+        # SMART DEDUPE (MERGE)
         # -----------------------------
-        mapped_df["score"] = (
-            mapped_df["investment"] * 0.6 +
-            mapped_df["last_contact_days"] * 10
+        before = len(mapped_df)
+
+        grouped_df = mapped_df.groupby("phone").agg({
+            "name": lambda x: x.mode()[0] if not x.mode().empty else x.iloc[0],
+            "investment": "sum",
+            "last_contact_days": "min"
+        }).reset_index()
+
+        after = len(grouped_df)
+
+        if before != after:
+            st.warning(f"⚠️ {before - after} duplicate entries merged intelligently")
+
+        # -----------------------------
+        # SCORING ENGINE
+        # -----------------------------
+        grouped_df["score"] = (
+            grouped_df["investment"] * 0.6 +
+            grouped_df["last_contact_days"] * 10
         )
 
-        mapped_df["priority"] = pd.cut(
-            mapped_df["score"],
+        grouped_df["priority"] = pd.cut(
+            grouped_df["score"],
             bins=[-1, 10000, 50000, 100000000],
             labels=["Low", "Medium", "High"]
         )
 
-        st.session_state.data = mapped_df
-        st.success("✅ Data Processed Successfully!")
+        st.session_state.data = grouped_df
+
+        st.success("✅ Data cleaned, merged, and processed successfully!")
 
 # -----------------------------
-# MAIN APP (AFTER DATA LOAD)
+# MAIN APP
 # -----------------------------
 if st.session_state.data is not None:
 
@@ -89,13 +151,16 @@ if st.session_state.data is not None:
 
     high_priority = df[df["priority"] == "High"]
 
-    for i, row in high_priority.head(5).iterrows():
-        st.write(f"👉 Call {row['name']} (High Potential Client)")
+    if len(high_priority) == 0:
+        st.info("No high priority clients found")
+    else:
+        for i, row in high_priority.head(5).iterrows():
+            st.write(f"👉 Call {row['name']} (High Potential)")
 
     # -----------------------------
-    # WHATSAPP GENERATOR
+    # WHATSAPP
     # -----------------------------
-    st.subheader("💬 WhatsApp Message Generator")
+    st.subheader("💬 WhatsApp Message")
 
     selected_client = st.selectbox("Select Client", df["name"])
 
@@ -103,46 +168,44 @@ if st.session_state.data is not None:
 
     message = f"""
 Hi {client_data['name']},  
-I wanted to discuss a good investment opportunity with you based on your profile.  
-Let me know a convenient time to connect.  
+I wanted to discuss a good investment opportunity with you.  
+Let me know a convenient time.  
 """
 
-    st.text_area("Generated Message", message, height=150)
+    st.text_area("Message", message)
 
-    phone = str(client_data["phone"])
-
+    phone = client_data["phone"]
     wa_link = f"https://wa.me/{phone}?text={message.replace(' ', '%20')}"
 
-    st.markdown(f"[📲 Send WhatsApp Message]({wa_link})")
+    st.markdown(f"[📲 Send WhatsApp]({wa_link})")
 
     # -----------------------------
-    # EVENT ENGINE (LITE)
+    # EVENT ENGINE
     # -----------------------------
-    st.subheader("🎯 Smart Event Engine")
+    st.subheader("🎯 Event Target Clients")
 
-    event_clients = df[df["priority"] != "Low"]
+    event_df = df[df["priority"] != "Low"]
 
-    st.write("Suggested Clients for Event:")
-    st.dataframe(event_clients[["name", "priority"]])
+    st.dataframe(event_df[["name", "priority"]])
 
-    if st.button("📩 Generate Event Invite Message"):
+    if st.button("📩 Generate Invite"):
         st.text("""
 Hello,  
-We are आयोजन an exclusive investment session.  
-Join us to explore new opportunities.  
+We are hosting an exclusive investment session.  
 Reply YES to confirm your seat.
         """)
 
     # -----------------------------
-    # DOWNLOAD PROCESSED DATA
+    # DOWNLOAD
     # -----------------------------
-    st.subheader("⬇️ Download Processed Data")
+    st.subheader("⬇️ Download Clean Data")
 
     st.download_button(
         "Download CSV",
         df.to_csv(index=False),
-        file_name="processed_clients.csv"
+        file_name="clean_clients.csv"
     )
 
 else:
-    st.info("👈 Upload an Excel file to start")
+    st.info("👈 Upload file to begin")
+    
