@@ -1,107 +1,148 @@
 import streamlit as st
 import pandas as pd
-import datetime
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+import numpy as np
 
-# --- CONFIGURATION & UI ---
-st.set_page_config(page_title="FinIntelligence Pro", layout="wide")
+st.set_page_config(page_title="Advisor AI System", layout="wide")
 
-# --- 1. PERSONALIZED GREETING LOGIC ---
-def get_greeting(name):
-    hour = datetime.datetime.now().hour
-    if hour < 12:
-        greet = "Good Morning"
-    elif 12 <= hour < 17:
-        greet = "Good Afternoon"
-    else:
-        greet = "Good Evening"
-    return f"Hi {name}, {greet}! ✨"
+st.title("📊 Advisor AI Growth System")
 
-# --- SIDEBAR: LOGIN & SETUP ---
-with st.sidebar:
-    st.title("Settings")
-    user_name = st.text_input("Enter your name", value="Advisor")
-    st.divider()
-    uploaded_file = st.file_uploader("Upload your Excel/CSV Data", type=['xlsx', 'csv'])
+# -----------------------------
+# SESSION STATE INIT
+# -----------------------------
+if "data" not in st.session_state:
+    st.session_state.data = None
 
-# --- MAIN INTERFACE ---
-st.title(get_greeting(user_name))
-st.subheader("What's on your mind today?")
+# -----------------------------
+# FILE UPLOAD
+# -----------------------------
+st.sidebar.header("📂 Upload Client Data")
+
+uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "csv"])
 
 if uploaded_file:
-    # Load Data
-    if uploaded_file.name.endswith('.csv'):
+    if uploaded_file.name.endswith(".csv"):
         df = pd.read_csv(uploaded_file)
     else:
         df = pd.read_excel(uploaded_file)
 
-    st.success("Data loaded successfully!")
-    
-    # --- 2. GENERAL MAPPING (The "Smart" part) ---
-    st.info("Identify your data columns so the AI can analyze them:")
+    st.subheader("🔍 Raw Data Preview")
+    st.dataframe(df.head())
+
+    # -----------------------------
+    # COLUMN MAPPING
+    # -----------------------------
+    st.subheader("⚙️ Map Your Columns")
+
+    columns = df.columns.tolist()
+
+    name_col = st.selectbox("Client Name Column", columns)
+    phone_col = st.selectbox("Phone Column", columns)
+    investment_col = st.selectbox("Investment Amount Column", columns)
+    last_contact_col = st.selectbox("Last Contact Days Column", columns)
+
+    if st.button("✅ Confirm Mapping"):
+        mapped_df = pd.DataFrame({
+            "name": df[name_col],
+            "phone": df[phone_col],
+            "investment": pd.to_numeric(df[investment_col], errors="coerce").fillna(0),
+            "last_contact_days": pd.to_numeric(df[last_contact_col], errors="coerce").fillna(30)
+        })
+
+        # -----------------------------
+        # SCORING ENGINE (RULE-BASED)
+        # -----------------------------
+        mapped_df["score"] = (
+            mapped_df["investment"] * 0.6 +
+            mapped_df["last_contact_days"] * 10
+        )
+
+        mapped_df["priority"] = pd.cut(
+            mapped_df["score"],
+            bins=[-1, 10000, 50000, 100000000],
+            labels=["Low", "Medium", "High"]
+        )
+
+        st.session_state.data = mapped_df
+        st.success("✅ Data Processed Successfully!")
+
+# -----------------------------
+# MAIN APP (AFTER DATA LOAD)
+# -----------------------------
+if st.session_state.data is not None:
+
+    df = st.session_state.data
+
+    st.subheader("📊 Dashboard")
+
     col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        name_col = st.selectbox("Client Name Column", df.columns)
-    with col2:
-        date_col = st.selectbox("Last Transaction Date", df.columns)
-    with col3:
-        val_col = st.selectbox("Total Investment/AUM Column", df.columns)
 
-    # Convert date
-    df[date_col] = pd.to_datetime(df[date_col])
-    
-    # --- 3. DATA SCIENCE ENGINE (Clustering) ---
-    # We calculate 'Recency' automatically for the user
-    df['DaysSinceLast'] = (pd.Timestamp.now() - df[date_col]).dt.days
-    
-    # Simple Clustering Logic
-    X = df[['DaysSinceLast', val_col]].fillna(0)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    model = KMeans(n_clusters=3, random_state=42)
-    df['Segment'] = model.fit_predict(X_scaled)
+    col1.metric("Total Clients", len(df))
+    col2.metric("Total Investment", int(df["investment"].sum()))
+    col3.metric("High Priority Clients", len(df[df["priority"] == "High"]))
 
-    # --- 4. ACTIONABLE DASHBOARD ---
-    st.divider()
-    st.header("🎯 Your Strategic Action Plan")
-    
-    tab1, tab2, tab3 = st.tabs(["Priority Meetings", "Event Planner", "Revenue Opportunities"])
+    st.dataframe(df)
 
-    with tab1:
-        st.write("### 🚨 Clients to Call Today (Risk of Churn)")
-        # Logic: High DaysSinceLast = High Risk
-        risk_clients = df.sort_values(by='DaysSinceLast', ascending=False).head(5)
-        st.table(risk_clients[[name_col, 'DaysSinceLast', val_col]])
+    # -----------------------------
+    # DECISION ENGINE
+    # -----------------------------
+    st.subheader("🧠 Next Best Actions")
 
-    with tab2:
-        st.write("### 📅 Micro-Event Suggestions")
-        st.write("Based on your data, group these clients for a tea-meet or webinar:")
-        # Logic: Suggesting the "Champion" segment for a referral event
-        champion_cluster = df[df['Segment'] == 0].head(10)
-        st.write(f"**Target Group:** Top Investors")
-        st.write(f"**Topic:** 'Exclusive Wealth Strategies for 2024'")
-        st.dataframe(champion_cluster[[name_col, val_col]])
+    high_priority = df[df["priority"] == "High"]
 
-    with tab3:
-        st.write("### 💰 Cross-Sell Potential")
-        # Logic: Low days since last but low AUM = Potential to grow
-        potential = df[(df['DaysSinceLast'] < 30) & (df[val_col] < df[val_col].median())]
-        st.write("These clients are active but have small portfolios. Pitch a new SIP!")
-        st.dataframe(potential[[name_col, val_col]])
+    for i, row in high_priority.head(5).iterrows():
+        st.write(f"👉 Call {row['name']} (High Potential Client)")
+
+    # -----------------------------
+    # WHATSAPP GENERATOR
+    # -----------------------------
+    st.subheader("💬 WhatsApp Message Generator")
+
+    selected_client = st.selectbox("Select Client", df["name"])
+
+    client_data = df[df["name"] == selected_client].iloc[0]
+
+    message = f"""
+Hi {client_data['name']},  
+I wanted to discuss a good investment opportunity with you based on your profile.  
+Let me know a convenient time to connect.  
+"""
+
+    st.text_area("Generated Message", message, height=150)
+
+    phone = str(client_data["phone"])
+
+    wa_link = f"https://wa.me/{phone}?text={message.replace(' ', '%20')}"
+
+    st.markdown(f"[📲 Send WhatsApp Message]({wa_link})")
+
+    # -----------------------------
+    # EVENT ENGINE (LITE)
+    # -----------------------------
+    st.subheader("🎯 Smart Event Engine")
+
+    event_clients = df[df["priority"] != "Low"]
+
+    st.write("Suggested Clients for Event:")
+    st.dataframe(event_clients[["name", "priority"]])
+
+    if st.button("📩 Generate Event Invite Message"):
+        st.text("""
+Hello,  
+We are आयोजन an exclusive investment session.  
+Join us to explore new opportunities.  
+Reply YES to confirm your seat.
+        """)
+
+    # -----------------------------
+    # DOWNLOAD PROCESSED DATA
+    # -----------------------------
+    st.subheader("⬇️ Download Processed Data")
+
+    st.download_button(
+        "Download CSV",
+        df.to_csv(index=False),
+        file_name="processed_clients.csv"
+    )
 
 else:
-    # DEFAULT VIEW (Before upload)
-    st.warning("Please upload your client data in the sidebar to begin.")
-    
-    # Visualizing how the data flows
-    
-    
-    st.write("""
-    ### Why use this instead of Excel?
-    1. **Predictive Alerts:** Excel shows what happened. This shows who is *leaving*.
-    2. **Automated Segmentation:** No manual pivot tables. The AI groups your clients for you.
-    3. **Action-Oriented:** It gives you a 'Call List' every morning.
-    """)    
+    st.info("👈 Upload an Excel file to start")
