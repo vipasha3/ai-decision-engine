@@ -6,6 +6,7 @@ import random
 import anthropic
 import json
 import re
+import plotly.express as px
 
 # Initialize navigation state
 if "screen" not in st.session_state:
@@ -21,6 +22,7 @@ st.set_page_config(
 # ── GLOBAL CSS ──────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
+
 @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
 
 :root {
@@ -262,6 +264,37 @@ div[data-testid="stMetric"] { background: transparent !important; }
 hr { border-color: var(--border) !important; }
 textarea { background: var(--surface) !important; border-color: var(--border) !important; color: var(--text) !important; border-radius: 8px !important; }
 .stRadio label { color: var(--muted2) !important; font-size: 13px !important; }
+
+/* --- ADD THIS INSIDE YOUR STYLE TAG --- */
+
+/* This transforms the default Streamlit button into a KPI Card */
+div.stButton > button[key^="kpi_"] {
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 12px !important;
+    padding: 1.2rem !important;
+    height: 140px !important;
+    width: 100% !important;
+    text-align: left !important;
+    display: block !important;
+    transition: all 0.2s ease !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05) !important;
+}
+
+/* Hover effect like Power BI */
+div.stButton > button[key^="kpi_"]:hover {
+    border-color: var(--accent) !important;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08) !important;
+    transform: translateY(-2px);
+}
+
+/* Adding the colored top-border to match your original design */
+div.stButton > button[key="kpi_all"] { border-top: 3px solid var(--green) !important; }
+div.stButton > button[key="kpi_high"] { border-top: 3px solid var(--blue) !important; }
+div.stButton > button[key="kpi_churn"] { border-top: 3px solid var(--red) !important; }
+div.stButton > button[key="kpi_sip"] { border-top: 3px solid var(--amber) !important; }
+div.stButton > button[key="kpi_nominee"] { border-top: 3px solid var(--purple) !important; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -554,6 +587,7 @@ def prepare_demo():
 # ── DASHBOARD ──────────────────────────────────────────────────────────────
 
 def show_dashboard(clients):
+    # 1. Keep your existing calculations
     total_aum = sum(num(c.get("portfolio", 0)) for c in clients)
     high = [c for c in clients if c.get("priority", "Low") == "High"]
     churn_risk_list = [c for c in clients if c.get("churn", 0) > 50]
@@ -562,7 +596,7 @@ def show_dashboard(clients):
     hni = [c for c in clients if "HNI" in c.get("flags", [])]
     top = clients[0] if clients else {}
 
-    # ── HEADER ──
+    # 2. Updated Header
     st.markdown(f"""
     <div class="top-header">
       <div class="top-header-left">
@@ -570,49 +604,56 @@ def show_dashboard(clients):
         <h1>Client Portfolio Intelligence</h1>
         <div class="subtitle">{len(clients)} clients · {fmt_inr(total_aum)} total AUM · ML scoring active</div>
       </div>
-      <div>
-        <div class="live-badge"><span class="live-dot"></span>Live · {datetime.datetime.now().strftime('%d %b %Y')}</div>
-        <br>
-      </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── KPI CARDS ──
-    st.markdown(f"""
-    <div class="kpi-row">
-      <div class="kpi-card green">
-        <div class="kpi-label">Total AUM</div>
-        <div class="kpi-val">{fmt_inr(total_aum)}</div>
-        <div class="kpi-sub">{len(clients)} clients tracked</div>
-        <div class="kpi-delta">↑ Portfolio pipeline</div>
-      </div>
-      <div class="kpi-card blue">
-        <div class="kpi-label">High Priority</div>
-        <div class="kpi-val">{len(high)}</div>
-        <div class="kpi-sub">ML score ≥ 70/100</div>
-        <div class="kpi-delta">{round(len(high)/len(clients)*100) if clients else 0}% of base · convert now</div>
-      </div>
-      <div class="kpi-card red">
-        <div class="kpi-label">Churn Risk</div>
-        <div class="kpi-val">{len(churn_risk_list)}</div>
-        <div class="kpi-sub">Probability &gt; 50%</div>
-        <div class="kpi-delta">⚠ Urgent action needed</div>
-      </div>
-      <div class="kpi-card amber">
-        <div class="kpi-label">SIP Gap</div>
-        <div class="kpi-val">{len(sip_gap)}</div>
-        <div class="kpi-sub">No SIP · have portfolio</div>
-        <div class="kpi-delta">Revenue opportunity</div>
-      </div>
-      <div class="kpi-card purple">
-        <div class="kpi-label">No Nominee</div>
-        <div class="kpi-val">{len(no_nom)}</div>
-        <div class="kpi-sub">Compliance exposure</div>
-        <div class="kpi-delta">Regulatory follow-up</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # 3. NEW CLICKABLE KPI CARDS (Replaces your old HTML block)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    
+    with c1:
+        if st.button(f"TOTAL AUM\n{fmt_inr(total_aum)}\nView All", key="kpi_all"):
+            st.session_state.filter_selection = "All clients"
+            st.rerun()
+    with c2:
+        if st.button(f"HIGH PRIORITY\n{len(high)}\nScore ≥ 70", key="kpi_high"):
+            st.session_state.filter_selection = "High priority"
+            st.rerun()
+    with c3:
+        if st.button(f"CHURN RISK\n{len(churn_risk_list)}\nAction Needed", key="kpi_churn"):
+            st.session_state.filter_selection = "Churn risk"
+            st.rerun()
+    with c4:
+        if st.button(f"SIP GAP\n{len(sip_gap)}\nGrowth Opt.", key="kpi_sip"):
+            st.session_state.filter_selection = "SIP gap"
+            st.rerun()
+    with c5:
+        if st.button(f"NO NOMINEE\n{len(no_nom)}\nCompliance", key="kpi_nominee"):
+            st.session_state.filter_selection = "No nominee"
+            st.rerun()
 
+    # 4. NEW INTELLIGENCE GRAPHS SECTION
+    st.markdown("### 📊 Company Intelligence Dashboard")
+    df_plot = pd.DataFrame(clients)
+    df_plot['portfolio_val'] = df_plot['portfolio'].apply(num)
+    
+    g1, g2 = st.columns(2)
+    with g1:
+        # Donut Chart for AUM
+        fig_pie = px.pie(df_plot, values='portfolio_val', names='priority', hole=0.4,
+                         title="AUM Concentration by Priority",
+                         color_discrete_map={'High':'#16a34a', 'Medium':'#d97706', 'Low':'#dc2626'})
+        fig_pie.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=300)
+        st.plotly_chart(fig_pie, use_container_width=True)
+        
+    with g2:
+        # Scatter Plot for Risk
+        fig_scatter = px.scatter(df_plot, x='score', y='churn', size='portfolio_val', 
+                                 color='priority', hover_name='name',
+                                 title="Client Health: Score vs Risk")
+        fig_scatter.update_layout(margin=dict(t=40, b=0, l=0, r=0), height=300)
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+    
     # ── AI INSIGHT ──
     summary = {
         "hni": len(hni), "churn": len(churn_risk_list),
