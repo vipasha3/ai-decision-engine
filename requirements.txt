@@ -1,8 +1,7 @@
 streamlit
 pandas
-scikit-learn
-openpyxl
 plotly
-numpy
-anthropic
-datetime
+openpyxl
+bcrypt
+scikit-learn
+pytz
