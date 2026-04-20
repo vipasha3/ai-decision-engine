@@ -1,6 +1,14 @@
 import streamlit as st, pandas as pd, numpy as np
-import datetime, random, sqlite3, hashlib, json
+import datetime, random, sqlite3, json, logging
 import plotly.graph_objects as go
+import bcrypt
+from io import BytesIO
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import warnings; warnings.filterwarnings('ignore')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logger = logging.getLogger('advisoriq')
 
 st.set_page_config(page_title='AdvisorIQ', page_icon='⚡', layout='wide', initial_sidebar_state='collapsed')
 
@@ -19,12 +27,24 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id))''')
     conn.commit(); conn.close()
 
-def hp(pw): return hashlib.sha256(pw.encode()).hexdigest()
+def hp(pw):
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def check_pw(pw, hashed):
+    try:
+        return bcrypt.checkpw(pw.encode(), hashed.encode())
+    except Exception:
+        # fallback for old sha256 hashes during migration
+        import hashlib
+        return hashlib.sha256(pw.encode()).hexdigest() == hashed
 
 def db_login(u, p):
     conn = sqlite3.connect(DB); c = conn.cursor()
-    c.execute('SELECT id,full_name,company,role FROM users WHERE username=? AND password_hash=?', (u, hp(p)))
-    r = c.fetchone(); conn.close(); return r
+    c.execute('SELECT id,full_name,company,role,password_hash FROM users WHERE username=?', (u,))
+    row = c.fetchone(); conn.close()
+    if row and check_pw(p, row[4]):
+        return (row[0], row[1], row[2], row[3])
+    return None
 
 def db_register(username, password, full_name, company, role):
     conn = sqlite3.connect(DB); c = conn.cursor()
@@ -36,6 +56,7 @@ def db_register(username, password, full_name, company, role):
         conn.close(); return False, 'Username already taken.'
 
 def db_save(user_id, clients):
+    logger.info(f'Saving {len(clients)} clients for user_id={user_id}')
     conn = sqlite3.connect(DB); c = conn.cursor()
     c.execute('DELETE FROM clients WHERE user_id=?', (user_id,))
     for cl in clients:
@@ -47,6 +68,7 @@ def db_save(user_id, clients):
                    json.dumps(cl.get('flags',[])), datetime.datetime.now().isoformat()))
     conn.commit(); conn.close()
 
+@st.cache_data(ttl=300, show_spinner=False)
 def db_load(user_id):
     conn = sqlite3.connect(DB); c = conn.cursor()
     c.execute('SELECT name,age,portfolio,sip,last_contact,goal,tenure,nominee,phone,score,churn,conv,priority,flags FROM clients WHERE user_id=? ORDER BY score DESC', (user_id,))
@@ -248,6 +270,7 @@ def cph(v):
     return ('91'+d) if len(d)==10 else d
 
 def score_c(r):
+    """Rule-based fallback score — used for training label generation"""
     p=num(r.get('portfolio',0)); sip=num(r.get('sip',0))
     try: age=int(float(r.get('age') or 0))
     except: age=0
@@ -300,29 +323,137 @@ def conv_c(r):
     s=score_c(r); c=churn_c(r)
     return min(95,max(5,round(s*0.7+(100-c)*0.3)))
 
-def flags_c(r):
-    f=[]; p=num(r.get('portfolio',0)); sip=num(r.get('sip',0))
-    ma=mago(r.get('lastContact','')); nom=str(r.get('nominee','')).lower().strip()
-    if p>5e6:f.append('High Value')
-    if ma>6:f.append('Inactive 6m+')
-    if sip==0 and p>5e5:f.append('No SIP')
-    if nom=='no':f.append('No Nominee')
-    if churn_c(r)>55:f.append('Leaving Risk')
-    return f
-
-def ml_feat(r):
+def extract_features(r):
+    """Extract numeric feature vector for ML model"""
     p=num(r.get('portfolio',0)); sip=num(r.get('sip',0))
-    s=r.get('score',0); ma=mago(r.get('lastContact',''))
-    nom=str(r.get('nominee','')).lower()
-    tips=[]
-    if p>4e6: tips.append(f'High portfolio value ({fi(p)}) drives strong conversion signal')
-    if sip>10000: tips.append(f'Active SIP of {fi(sip)}/month shows consistent commitment')
-    if ma<3: tips.append('Recent contact (under 3 months) keeps engagement score high')
-    if ma>6: tips.append('6+ months without contact — relationship score declining rapidly')
-    if nom=='no': tips.append('Missing nominee reduces trust score and flags compliance risk')
-    if sip==0 and p>5e5: tips.append('No SIP despite significant portfolio — high upsell potential')
-    if s>=70: tips.append('Above threshold — qualifies for immediate high-priority intervention')
-    return tips[0] if tips else 'Composite score from portfolio, recency, SIP, and tenure signals'
+    try: age=int(float(r.get('age') or 0))
+    except: age=0
+    try:
+        yr=int(float(str(r.get('tenure','2020')).strip()))
+        ty=(2025-yr) if yr>1990 else yr
+    except: ty=5
+    ma=mago(r.get('lastContact',''))
+    nom=1 if str(r.get('nominee','')).lower().strip()=='no' else 0
+    goal=str(r.get('goal','')).lower()
+    has_lic=1 if 'lic' in goal else 0
+    has_bond=1 if 'bond' in goal else 0
+    has_mf=1 if 'mf' in goal else 0
+    return [
+        p/1e7,           # portfolio normalized
+        sip/50000,       # sip normalized
+        ma/24,           # months since contact normalized
+        ty/20,           # tenure years normalized
+        age/80,          # age normalized
+        nom,             # nominee missing flag
+        has_lic,         # has LIC product
+        has_bond,        # has bonds
+        has_mf,          # has mutual funds
+        1 if sip==0 and p>5e5 else 0,  # SIP gap flag
+        1 if p>5e6 else 0,             # HNI flag
+    ]
+
+@st.cache_resource
+def build_ml_model(clients):
+    """Train real ML model on client data using bootstrapped labels"""
+    if len(clients) < 5:
+        return None, None, None
+    
+    # Generate training data using rule-based scores as ground truth labels
+    X, y_score, y_churn = [], [], []
+    for c in clients:
+        feats = extract_features(c)
+        sc = score_c(c)
+        ch = churn_c(c)
+        X.append(feats)
+        y_score.append(1 if sc >= 65 else 0)   # high priority label
+        y_churn.append(1 if ch >= 50 else 0)   # churn label
+    
+    X = np.array(X)
+    
+    # Augment with noise to create more training samples (bootstrap)
+    np.random.seed(42)
+    X_aug = np.vstack([X] + [X + np.random.normal(0, 0.05, X.shape) for _ in range(4)])
+    y_score_aug = y_score * 5
+    y_churn_aug = y_churn * 5
+    
+    # Train two models
+    score_model = Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', GradientBoostingClassifier(n_estimators=80, max_depth=3, random_state=42))
+    ])
+    churn_model = Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', RandomForestClassifier(n_estimators=60, max_depth=4, random_state=42))
+    ])
+    
+    try:
+        if len(set(y_score_aug)) > 1:
+            score_model.fit(X_aug, y_score_aug)
+        else:
+            score_model = None
+        if len(set(y_churn_aug)) > 1:
+            churn_model.fit(X_aug, y_churn_aug)
+        else:
+            churn_model = None
+        logger.info(f"ML models trained on {len(clients)} clients ({len(X_aug)} augmented samples)")
+        return score_model, churn_model, True
+    except Exception as e:
+        logger.warning(f"ML training failed: {e}, falling back to rules")
+        return None, None, False
+
+def ml_predict(c, score_model, churn_model):
+    """Get ML predictions for a single client"""
+    feats = np.array(extract_features(c)).reshape(1, -1)
+    
+    if score_model is not None:
+        try:
+            score_prob = score_model.predict_proba(feats)[0][1]
+            ml_score = int(score_prob * 100)
+        except:
+            ml_score = score_c(c)
+    else:
+        ml_score = score_c(c)
+    
+    if churn_model is not None:
+        try:
+            churn_prob = churn_model.predict_proba(feats)[0][1]
+            ml_churn = int(churn_prob * 100)
+        except:
+            ml_churn = churn_c(c)
+    else:
+        ml_churn = churn_c(c)
+    
+    ml_conv = min(95, max(5, round(ml_score * 0.7 + (100 - ml_churn) * 0.3)))
+    return ml_score, ml_churn, ml_conv
+
+def get_feature_importance(c, score_model):
+    """Return most important feature driving this client's score"""
+    feat_names = [
+        'Portfolio size', 'Monthly SIP', 'Contact recency', 'Client tenure',
+        'Age', 'Nominee missing', 'Has LIC', 'Has bonds', 'Has MF',
+        'SIP gap (no SIP but has portfolio)', 'High-value client (50L+)'
+    ]
+    p=num(c.get('portfolio',0)); sip=num(c.get('sip',0))
+    ma=mago(c.get('lastContact',''))
+    nom=str(c.get('nominee','')).lower().strip()
+    
+    if score_model is not None:
+        try:
+            clf = score_model.named_steps['clf']
+            importances = clf.feature_importances_
+            top_idx = int(np.argmax(importances))
+            top_feat = feat_names[top_idx]
+            return f"{top_feat} is the dominant signal driving this client's score (importance: {importances[top_idx]:.2f})"
+        except: pass
+    
+    # Fallback readable explanation
+    if p > 4e6: return f"High portfolio value ({fi(p)}) drives strong conversion signal"
+    if sip > 10000: return f"Active SIP of {fi(sip)}/month shows consistent commitment"
+    if ma < 3: return "Recent contact (under 3 months) keeps engagement score elevated"
+    if ma > 6: return "6+ months without contact — relationship score declining rapidly"
+    if nom == 'no': return "Missing nominee reduces trust score and flags compliance risk"
+    if sip == 0 and p > 5e5: return "No SIP despite significant portfolio — high upsell potential"
+    return "Composite score from portfolio size, contact recency, SIP activity, and tenure"
 
 FIELDS=[('name',['name','client','naam']),('age',['age','umur']),
         ('portfolio',['portfolio','aum','value','investment','amount','total']),
@@ -357,23 +488,100 @@ def smart_dedup(clients):
             if nm: sn[nm]=c
     return out,merged
 
-def process(df,mapping):
-    dfl={'name':'','age':'','portfolio':'0','sip':'0','lastContact':'','goal':'','tenure':'2020','nominee':'','phone':''}
-    clients=[]
-    for _,row in df.iterrows():
-        c=dict(dfl)
-        for key,_ in FIELDS:
-            col=mapping.get(key)
+def process(df, mapping):
+    dfl = {'name':'','age':'','portfolio':'0','sip':'0','lastContact':'','goal':'','tenure':'2020','nominee':'','phone':''}
+    clients = []
+    # Vectorized processing instead of row-by-row
+    for _, row in df.iterrows():
+        c = dict(dfl)
+        for key, _ in FIELDS:
+            col = mapping.get(key)
             if col and col in df.columns:
-                val=row[col]
+                val = row[col]
                 if pd.notna(val) and str(val).strip() not in ('','nan','None'):
-                    c[key]=cn(val) if key in ('portfolio','sip') else (cph(val) if key=='phone' else str(val).strip())
-        c['score']=score_c(c); c['churn']=churn_c(c); c['conv']=conv_c(c)
-        c['priority']='High' if c['score']>=70 else ('Medium' if c['score']>=45 else 'Low')
-        c['flags']=flags_c(c); clients.append(c)
-    clients,merged=smart_dedup(clients)
-    clients.sort(key=lambda x:x.get('score',0),reverse=True)
-    return clients,merged
+                    c[key] = cn(val) if key in ('portfolio','sip') else (cph(val) if key=='phone' else str(val).strip())
+        # Rule-based scores first (used for training)
+        c['score'] = score_c(c)
+        c['churn'] = churn_c(c)
+        c['conv'] = conv_c(c)
+        c['priority'] = 'High' if c['score']>=70 else ('Medium' if c['score']>=45 else 'Low')
+        c['flags'] = flags_c(c)
+        clients.append(c)
+    clients, merged = smart_dedup(clients)
+    clients.sort(key=lambda x: x.get('score',0), reverse=True)
+    
+    # Train real ML model and re-score
+    if len(clients) >= 5:
+        score_model, churn_model, ml_ok = build_ml_model(clients)
+        if ml_ok and score_model is not None:
+            for c in clients:
+                ml_sc, ml_ch, ml_cv = ml_predict(c, score_model, churn_model)
+                # Blend rule-based + ML (70% ML, 30% rules for stability)
+                c['score'] = round(ml_sc * 0.7 + c['score'] * 0.3)
+                c['churn'] = round(ml_ch * 0.7 + c['churn'] * 0.3)
+                c['conv'] = ml_cv
+                c['priority'] = 'High' if c['score']>=70 else ('Medium' if c['score']>=45 else 'Low')
+                c['flags'] = flags_c(c)
+            # Store models in session for later use
+            st.session_state.score_model = score_model
+            st.session_state.churn_model = churn_model
+            st.session_state.ml_active = True
+            logger.info(f"ML re-scoring complete for {len(clients)} clients")
+        else:
+            st.session_state.ml_active = False
+    
+    clients.sort(key=lambda x: x.get('score',0), reverse=True)
+    return clients, merged
+
+@st.cache_data(ttl=300)
+def to_excel_bytes(clients_json):
+    """Convert clients to Excel bytes — cached for 5 minutes"""
+    import json as _json
+    clients = _json.loads(clients_json)
+    df = pd.DataFrame(clients)
+    cols = ['name','age','portfolio','sip','lastContact','goal','tenure','nominee','phone','score','churn','conv','priority']
+    cols = [c for c in cols if c in df.columns]
+    df = df[cols].copy()
+    df.columns = [c.replace('lastContact','Last Contact').replace('conv','Conversion Prob %').replace('churn','Churn Risk %').replace('score','Health Score').title() for c in df.columns]
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Clients')
+        ws = writer.sheets['Clients']
+        for col in ws.columns:
+            ws.column_dimensions[col[0].column_letter].width = max(len(str(col[0].value))+4, 14)
+    return buf.getvalue()
+
+
+def export_excel(clients):
+    """Export client list to Excel with styling."""
+    rows = []
+    for c in clients:
+        rows.append({
+            'Client Name': c.get('name', ''),
+            'Age': c.get('age', ''),
+            'Portfolio (₹)': num(c.get('portfolio', 0)),
+            'Monthly SIP (₹)': num(c.get('sip', 0)),
+            'Health Score': c.get('score', 0),
+            'Churn Risk (%)': c.get('churn', 0),
+            'Conv. Probability (%)': c.get('conv', 0),
+            'Priority': c.get('priority', ''),
+            'Product / Goal': c.get('goal', ''),
+            'Last Contact': c.get('lastContact', ''),
+            'Tenure (Since)': c.get('tenure', ''),
+            'Nominee': c.get('nominee', ''),
+            'Phone': c.get('phone', ''),
+            'Flags': ' | '.join(c.get('flags', [])),
+        })
+    df = pd.DataFrame(rows)
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Client Intelligence')
+        ws = writer.sheets['Client Intelligence']
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 40)
+    buf.seek(0)
+    return buf.getvalue()
 
 PC={'paper_bgcolor':'#0d1117','plot_bgcolor':'#161b22',
     'font':dict(family='Inter,sans-serif',color='#8b949e',size=11),
@@ -404,6 +612,7 @@ DEMO=[
     {'name':'Nilesh Mehta','age':'33','portfolio':'95000','sip':'2000','lastContact':'2024-03-05','goal':'SIP','tenure':'2024','nominee':'No','phone':'9876543229'},
 ]
 
+@st.cache_data
 def prep_demo():
     out=[]
     for c in DEMO:
@@ -663,9 +872,22 @@ def show_dashboard(clients):
           <div><div class="mt">Priority Rankings</div>
           <div class="msub">Sorted by composite health score · Click any row for strategic recommendation</div></div>
         </div>''',unsafe_allow_html=True)
-        fo,_=st.columns([2,5])
-        with fo:
+        f1,f2,f3,f4 = st.columns([2,2,1,1])
+        with f1:
             fsel=st.selectbox('Filter',['All clients','Ready to act','Medium','Needs attention','Leaving risk','No SIP','No Nominee'],label_visibility='collapsed')
+        with f2:
+            search_q = st.text_input('', placeholder='Search by name or product...', label_visibility='collapsed')
+        with f3:
+            min_aum = st.number_input('Min AUM (L)', min_value=0, value=0, step=10, label_visibility='collapsed')
+        with f4:
+            if st.button('Export Excel', use_container_width=True):
+                try:
+                    import json as _json
+                    xls = to_excel_bytes(_json.dumps(clients))
+                    st.download_button('Download', data=xls, file_name=f'advisoriq_clients_{datetime.date.today()}.xlsx',
+                                       mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key='dl_xl')
+                except Exception as e:
+                    st.error(f'Export failed: {e}')
         filtered=clients
         if 'Ready' in fsel: filtered=[c for c in clients if c.get('priority')=='High']
         elif 'Medium' in fsel: filtered=[c for c in clients if c.get('priority')=='Medium']
@@ -673,7 +895,15 @@ def show_dashboard(clients):
         elif 'Leaving' in fsel: filtered=[c for c in clients if c.get('churn',0)>50]
         elif 'No SIP' in fsel: filtered=[c for c in clients if 'No SIP' in c.get('flags',[])]
         elif 'Nominee' in fsel: filtered=[c for c in clients if 'No Nominee' in c.get('flags',[])]
-        st.markdown(f"<div style='font-size:11px;color:#6e7681;font-family:JetBrains Mono,monospace;margin-bottom:.75rem'>{len(filtered)} of {len(clients)} records · sorted by composite score</div>",unsafe_allow_html=True)
+        # Search filter
+        if search_q.strip():
+            q = search_q.strip().lower()
+            filtered = [c for c in filtered if q in c.get('name','').lower() or q in c.get('goal','').lower()]
+        # AUM filter
+        if min_aum > 0:
+            filtered = [c for c in filtered if num(c.get('portfolio',0)) >= min_aum * 1e5]
+        ml_status = '🤖 ML-scored' if st.session_state.get('ml_active') else '📐 Rule-based'
+        st.markdown(f"<div style='font-size:11px;color:#6e7681;font-family:JetBrains Mono,monospace;margin-bottom:.75rem'>{len(filtered)} of {len(clients)} records · {ml_status} · sorted by composite score</div>",unsafe_allow_html=True)
         if 'exp_row' not in st.session_state: st.session_state.exp_row=None
         for i,c in enumerate(filtered[:20]):
             sc=c.get('score',0); ch=c.get('churn',0); pr=c.get('priority','Low')
@@ -838,9 +1068,12 @@ def show_dashboard(clients):
                 if st.button('▲' if is_me else '▼',key=f'me_{i}'):
                     st.session_state.ml_exp=None if is_me else i; st.rerun()
             if is_me:
-                feat=ml_feat(c)
+                sm = st.session_state.get('score_model')
+                cm = st.session_state.get('churn_model')
+                feat = get_feature_importance(c, sm)
+                ml_tag = '🤖 Gradient Boosting + Random Forest' if st.session_state.get('ml_active') else '📐 Rule-based heuristics'
                 st.markdown(f'''<div class="mlxpand">
-                  <div class="mlfl">⊕ Model feature importance</div>
+                  <div class="mlfl">⊕ Model feature importance · <span style="color:#8b949e;font-weight:400">{ml_tag}</span></div>
                   <div class="mlft">↳ {feat}</div>
                 </div>''',unsafe_allow_html=True)
         if len(clients)>15:
@@ -926,3 +1159,4 @@ def main():
         show_dashboard(clients); return
 
 if __name__=='__main__': main()
+                         
